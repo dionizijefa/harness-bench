@@ -116,6 +116,40 @@ uv run dagster job execute \
 ```
 
 Verifiers writes `config.toml` and `traces.jsonl` beneath
-`outputs/<dagster-run-id>/<rollout>/`. The final Dagster step upserts every
-rollout into the queryable cross-run database at `outputs/results.sqlite`.
-No separate flat results file is created.
+`outputs/<dagster-run-id>/<rollout>/`. Each rollout is independently upserted
+into the queryable cross-run database at `outputs/results.sqlite`, so completed
+results and hard failures survive even when another mapped rollout fails. The
+final Dagster step repeats the upsert for the complete batch. No separate flat
+results file is created.
+
+## Results database
+
+The `rollout_results` table records the model, harness and exact harness
+version, dataset, task, rollout number, status, pass/fail result, reward,
+runtime, token usage, model-call count, provider-reported USD cost, trace ID,
+and error details. `usage_source` distinguishes complete provider usage from
+partial provider usage and trace-derived fallback counts. Cost and reasoning
+tokens remain `NULL` when the provider does not return them.
+
+Provider input-token counts include cached input. For uncached input, subtract
+`cached_input_tokens` from `input_tokens`:
+
+```sql
+SELECT
+  harness,
+  harness_version,
+  task_id,
+  status,
+  passed,
+  input_tokens,
+  COALESCE(cached_input_tokens, 0) AS cached_input_tokens,
+  input_tokens - COALESCE(cached_input_tokens, 0) AS uncached_input_tokens,
+  output_tokens,
+  reasoning_tokens,
+  total_tokens,
+  model_call_count,
+  cost_usd,
+  usage_source
+FROM rollout_results
+ORDER BY timestamp, harness, task_id, rollout;
+```

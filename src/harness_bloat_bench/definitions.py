@@ -237,7 +237,6 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         )
     )
     trace = traces[0]
-    usage = trace.usage
     error = trace.error.model_dump() if trace.error else None
     reward = trace.reward
     row = {
@@ -249,12 +248,67 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         "rewards": trace.rewards,
         "error": error,
         "runtime_seconds": time.perf_counter() - started,
+        **_trace_usage_fields(trace),
+    }
+    return row
+
+
+def _trace_usage_fields(trace) -> dict:
+    usage = trace.usage
+    model_nodes = [node for node in trace.nodes if node.sampled]
+    usage_count = sum(node.usage is not None for node in model_nodes)
+    usage_source = (
+        "provider"
+        if usage is not None and usage_count == len(model_nodes)
+        else "provider_partial"
+        if usage is not None
+        else "trace_fallback"
+    )
+    return {
         "input_tokens": usage.input_tokens if usage else trace.num_input_tokens,
         "cached_input_tokens": usage.cached_input_tokens if usage else None,
         "output_tokens": usage.completion_tokens if usage else trace.num_output_tokens,
         "total_tokens": usage.total_tokens if usage else trace.num_total_tokens,
+        "reasoning_tokens": usage.reasoning_tokens if usage else None,
+        "model_call_count": len(model_nodes),
+        "usage_source": usage_source,
+        "cost_usd": usage.cost if usage else None,
     }
-    return row
+
+
+def _hard_failure_row(
+    spec: dict,
+    dagster_run_id: str,
+    error: Exception,
+    runtime_seconds: float,
+) -> dict:
+    output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
+    return {
+        "dagster_run_id": dagster_run_id,
+        "rollout_key": spec["key"],
+        "model": spec["model"],
+        "harness": spec["harness"],
+        "harness_version": spec["harness_version"],
+        "dataset": spec["dataset"],
+        "task_id": spec["task_id"],
+        "rollout": spec["rollout"],
+        "output_dir": str(output_dir),
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "status": "error",
+        "passed": False,
+        "reward": None,
+        "rewards": {},
+        "error": {"type": type(error).__name__, "message": str(error)},
+        "runtime_seconds": runtime_seconds,
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "reasoning_tokens": None,
+        "model_call_count": None,
+        "usage_source": None,
+        "cost_usd": None,
+    }
 
 
 def _ssh_command(remote: dict, command: str) -> list[str]:
@@ -352,16 +406,32 @@ def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
 
 @dg.op(pool="rollouts")
 def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
-    row = (
-        _run_remote_rollout(context, spec)
-        if spec.get("remote")
-        else _execute_rollout(spec, context.run_id)
-    )
+    started = time.perf_counter()
+    try:
+        row = (
+            _run_remote_rollout(context, spec)
+            if spec.get("remote")
+            else _execute_rollout(spec, context.run_id)
+        )
+    except Exception as error:
+        row = _hard_failure_row(
+            spec, context.run_id, error, time.perf_counter() - started
+        )
+        database_path = _persist_rollout_row(row)
+        context.log.error(
+            "Persisted failed rollout to %s before re-raising: %s",
+            database_path,
+            error,
+        )
+        raise
+
+    database_path = _persist_rollout_row(row)
     if not spec["dry_run"]:
         metadata = {
             "task": spec["task_id"],
             "reward": row["reward"],
             "passed": row["passed"],
+            "database": dg.MetadataValue.path(str(database_path)),
         }
         if spec.get("remote") and not spec["remote"]["copy_artifacts"]:
             metadata["remote_trace"] = dg.MetadataValue.text(
@@ -379,8 +449,8 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
     path = output_root / "results.sqlite"
     connection = sqlite3.connect(path, timeout=30)
     try:
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
         with connection:
             connection.executescript(
                 """
@@ -402,7 +472,13 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                     cached_input_tokens INTEGER,
                     output_tokens INTEGER,
                     total_tokens INTEGER,
+                    reasoning_tokens INTEGER,
+                    model_call_count INTEGER,
+                    usage_source TEXT,
+                    cost_usd REAL,
                     trace_id TEXT,
+                    error_type TEXT,
+                    error_message TEXT,
                     output_dir TEXT NOT NULL,
                     remote_output_dir TEXT,
                     row_json TEXT NOT NULL,
@@ -412,48 +488,111 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                     ON rollout_results (model, harness, task_id, status);
                 """
             )
-            connection.executemany(
-                """
-                INSERT OR REPLACE INTO rollout_results (
-                    dagster_run_id, rollout_key, timestamp, model, harness,
-                    harness_version, dataset, task_id, rollout, status, passed,
-                    reward, runtime_seconds, input_tokens, cached_input_tokens,
-                    output_tokens, total_tokens, trace_id, output_dir,
-                    remote_output_dir, row_json
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                [
-                    (
-                        row["dagster_run_id"],
-                        row["rollout_key"],
-                        row["timestamp"],
-                        row["model"],
-                        row["harness"],
-                        row["harness_version"],
-                        row["dataset"],
-                        row["task_id"],
-                        row["rollout"],
-                        row["status"],
-                        None if row.get("passed") is None else int(row["passed"]),
-                        row.get("reward"),
-                        row.get("runtime_seconds"),
-                        row.get("input_tokens"),
-                        row.get("cached_input_tokens"),
-                        row.get("output_tokens"),
-                        row.get("total_tokens"),
-                        row.get("trace_id"),
-                        row["output_dir"],
-                        row.get("remote_output_dir"),
-                        json.dumps(row, sort_keys=True),
+            existing_columns = {
+                info[1]
+                for info in connection.execute("PRAGMA table_info(rollout_results)")
+            }
+            for column, column_type in {
+                "reasoning_tokens": "INTEGER",
+                "model_call_count": "INTEGER",
+                "usage_source": "TEXT",
+                "cost_usd": "REAL",
+                "error_type": "TEXT",
+                "error_message": "TEXT",
+            }.items():
+                if column not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE rollout_results ADD COLUMN {column} {column_type}"
                     )
-                    for row in rows
-                ],
+
+            columns = (
+                "dagster_run_id",
+                "rollout_key",
+                "timestamp",
+                "model",
+                "harness",
+                "harness_version",
+                "dataset",
+                "task_id",
+                "rollout",
+                "status",
+                "passed",
+                "reward",
+                "runtime_seconds",
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "reasoning_tokens",
+                "model_call_count",
+                "usage_source",
+                "cost_usd",
+                "trace_id",
+                "error_type",
+                "error_message",
+                "output_dir",
+                "remote_output_dir",
+                "row_json",
+            )
+            placeholders = ", ".join("?" for _ in columns)
+            column_names = ", ".join(columns)
+            connection.executemany(
+                f"INSERT OR REPLACE INTO rollout_results ({column_names}) "
+                f"VALUES ({placeholders})",
+                [_database_values(row) for row in rows],
             )
     finally:
         connection.close()
     return path
+
+
+def _database_values(row: dict) -> tuple:
+    error = row.get("error")
+    error_type = (
+        error.get("type") or error.get("kind") or error.get("error_type")
+        if isinstance(error, dict)
+        else None
+    )
+    error_message = (
+        error.get("message") or error.get("detail")
+        if isinstance(error, dict)
+        else None
+    )
+    return (
+        row["dagster_run_id"],
+        row["rollout_key"],
+        row["timestamp"],
+        row["model"],
+        row["harness"],
+        row["harness_version"],
+        row["dataset"],
+        row["task_id"],
+        row["rollout"],
+        row["status"],
+        None if row.get("passed") is None else int(row["passed"]),
+        row.get("reward"),
+        row.get("runtime_seconds"),
+        row.get("input_tokens"),
+        row.get("cached_input_tokens"),
+        row.get("output_tokens"),
+        row.get("total_tokens"),
+        row.get("reasoning_tokens"),
+        row.get("model_call_count"),
+        row.get("usage_source"),
+        row.get("cost_usd"),
+        row.get("trace_id"),
+        error_type,
+        error_message,
+        row["output_dir"],
+        row.get("remote_output_dir"),
+        json.dumps(row, sort_keys=True),
+    )
+
+
+def _persist_rollout_row(row: dict) -> Path:
+    output_root = Path(row["output_dir"]).parents[1]
+    output_root.mkdir(parents=True, exist_ok=True)
+    return _write_results_db([row], output_root)
 
 
 @dg.op

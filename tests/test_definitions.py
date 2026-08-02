@@ -1,9 +1,19 @@
 import json
+import sqlite3
 from pathlib import Path
 
+import dagster as dg
 import pytest
 
-from harness_bloat_bench.definitions import _eval_config, terminal_bench_rollouts
+from harness_bloat_bench.definitions import (
+    MatrixConfig,
+    SSHExecutionConfig,
+    _configured_remote,
+    _eval_config,
+    _remote_dict,
+    _task_ids,
+    terminal_bench_rollouts,
+)
 
 
 def test_dry_run_matrix(tmp_path: Path) -> None:
@@ -25,18 +35,83 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     )
 
     assert result.success
-    path = Path(result.output_for_node("write_results"))
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert len(rows) == 4
-    assert {row["model"] for row in rows} == {"model-a", "model-b"}
-    assert {row["task_id"] for row in rows} == {"task-a"}
-    assert all(row["status"] == "dry_run" for row in rows)
+    database_path = Path(result.output_for_node("write_results"))
+    assert database_path == tmp_path / "results.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            """
+            SELECT model, task_id, status
+            FROM rollout_results
+            ORDER BY rollout_key
+            """
+        ).fetchall()
+    assert stored == [
+        ("model-a", "task-a", "dry_run"),
+        ("model-a", "task-a", "dry_run"),
+        ("model-b", "task-a", "dry_run"),
+        ("model-b", "task-a", "dry_run"),
+    ]
+
+
+def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
+    config = MatrixConfig(
+        task_ids=["terminal-bench/task-a"],
+        remote=SSHExecutionConfig(
+            host="terminal-bench",
+            project_dir="/srv/harness-bloat-bench",
+        ),
+    )
+
+    assert _task_ids(config) == ["task-a"]
+    validated = dg.validate_run_config(
+        terminal_bench_rollouts,
+        {
+            "ops": {
+                "plan_rollouts": {
+                    "config": {
+                        "task_ids": ["task-a"],
+                        "remote": {
+                            "host": "terminal-bench",
+                            "project_dir": "/srv/harness-bloat-bench",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    assert validated["ops"]["plan_rollouts"]["config"]["remote"] == {
+        "host": "terminal-bench",
+        "project_dir": "/srv/harness-bloat-bench",
+        "ssh_options": [],
+        "copy_artifacts": True,
+    }
+
+
+def test_private_remote_config_loader(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "remote.json"
+    path.write_text(
+        json.dumps(
+            {
+                "host": "terminal-bench",
+                "project_dir": "/srv/harness-bloat-bench",
+                "copy_artifacts": True,
+            }
+        )
+    )
+    monkeypatch.setenv("HARNESS_BLOAT_REMOTE_CONFIG", str(path))
+
+    assert _configured_remote() == {
+        "host": "terminal-bench",
+        "project_dir": "/srv/harness-bloat-bench",
+        "copy_artifacts": True,
+    }
+    assert _remote_dict(_configured_remote()) == _configured_remote()
 
 
 def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     config = _eval_config(
         {
-            "model": "qwen/qwen3.7-max",
+            "model": "deepseek/deepseek-v4-flash-latest",
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_var": "OPENROUTER_API_KEY",
             "dataset": "terminal-bench/terminal-bench-2-1",
@@ -69,7 +144,7 @@ def test_eval_config_resolves_local_harness_plugins(
 ) -> None:
     config = _eval_config(
         {
-            "model": "qwen/qwen3.7-max",
+            "model": "deepseek/deepseek-v4-flash-latest",
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_var": "OPENROUTER_API_KEY",
             "dataset": "terminal-bench/terminal-bench-2-1",
@@ -111,9 +186,14 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
     )
 
     assert result.success
-    path = Path(result.output_for_node("write_results"))
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert {(row["harness"], row["harness_version"]) for row in rows} == {
+    database_path = Path(result.output_for_node("write_results"))
+    with sqlite3.connect(database_path) as connection:
+        harnesses = set(
+            connection.execute(
+                "SELECT harness, harness_version FROM rollout_results"
+            ).fetchall()
+        )
+    assert harnesses == {
         ("codex", "0.137.0"),
         ("opencode", "1.18.1"),
         ("pi", "0.80.7"),

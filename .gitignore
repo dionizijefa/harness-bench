@@ -1,9 +1,11 @@
 .DS_Store
 .venv
+.env
+.env.*
+!.env.example
 .pytest_cache/
 .ruff_cache/
-.dagster/*
-!.dagster/dagster.yaml
+.dagster/
 __pycache__/
 *.py[cod]
 outputs/

@@ -8,12 +8,15 @@ Each dynamically mapped `run_rollout` step is exactly one Verifiers rollout. Ver
 
 ```sh
 uv sync
-export OPENROUTER_API_KEY=sk-or-...
-mkdir -p .dagster
-export DAGSTER_HOME="$PWD/.dagster"
-uv run dagster instance concurrency set rollouts 4
-uv run dagster dev -m harness_bloat_bench.definitions
+cp .env.example .env
+# Add OPENROUTER_API_KEY to the private .env file.
+./scripts/dagster-ui
 ```
+
+The launcher creates the local `.dagster` directory, configures the global
+`rollouts` concurrency limit, and starts the UI at http://localhost:3000.
+Additional `dagster dev` options are passed through, for example
+`./scripts/dagster-ui --port 3001`.
 
 Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the Launchpad:
 
@@ -21,7 +24,7 @@ Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the L
 ops:
   plan_rollouts:
     config:
-      models: [qwen/qwen3.7-max]
+      models: [deepseek/deepseek-v4-flash-latest]
       harnesses:
         - id: codex
         - id: opencode
@@ -43,7 +46,56 @@ The adapters install the official Linux release artifacts inside each rollout sa
 
 The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.
 
-To let Dagster expand every task in the dataset, set `task_ids: []`. To verify the graph without Docker or model calls, set `dry_run: true` and provide at least one task ID.
+## Remote SSH workers
+
+Dagster remains on the local machine while individual rollouts run on a remote
+Docker host over SSH. Define the host in `~/.ssh/config` so regular
+`ssh terminal-bench` authentication works, then run the one-time setup:
+
+```sh
+./scripts/configure-remote terminal-bench
+```
+
+This checks the connection, syncs the project, runs `uv sync` remotely, and
+writes the host and path to the ignored `.dagster/remote.json`. It uses
+`~/harness-bloat-bench` on the worker by default; pass an absolute path as a
+second argument to override it. Restart
+`./scripts/dagster-ui`, select `terminal_bench_rollouts`, and click **Launch
+Run**. The private remote config is automatically used as the job default.
+
+An explicit Launchpad `remote` block overrides the private default when needed:
+
+```yaml
+ops:
+  plan_rollouts:
+    config:
+      task_ids: [adaptive-rejection-sampler]
+      remote:
+        host: terminal-bench
+        project_dir: /home/REMOTE_USER/harness-bloat-bench
+```
+
+A complete non-secret example is checked in at `configs/remote.example.yaml`.
+
+Each mapped rollout starts a remote worker through the local OpenSSH client.
+Its stdout is streamed into the local Dagster logs, and its output directory is
+copied back to the matching local `outputs/<dagster-run-id>/<rollout>/` path.
+The API key named by `api_key_var` is forwarded over the encrypted SSH stdin
+stream when it exists locally; otherwise it must already exist in the remote
+worker environment. Set `copy_artifacts: false` to keep large trace artifacts
+only on the remote host.
+
+Remote runs currently require explicit `task_ids`; `task_ids: []` performs
+dataset discovery locally and is therefore rejected in SSH mode. The remote
+setup command can be rerun to resync after local code or lockfile changes.
+
+`.env`, `.env.*`, and the entire `.dagster/` directory are ignored. The
+OpenRouter key, SSH host, username, key paths, and remote filesystem paths must
+stay in those private files or in `~/.ssh/config`, never in committed config.
+
+For local runs, let Dagster expand every task in the dataset with `task_ids: []`.
+To verify the graph without Docker or model calls, set `dry_run: true` and
+provide at least one task ID.
 
 Headless execution uses the same run config:
 
@@ -63,4 +115,7 @@ uv run dagster job execute \
   -c configs/dry-run.yaml
 ```
 
-Verifiers writes `config.toml` and `traces.jsonl` beneath `outputs/<dagster-run-id>/<rollout>/`. The final Dagster step writes the flat benchmark table to `outputs/<dagster-run-id>/results.jsonl`.
+Verifiers writes `config.toml` and `traces.jsonl` beneath
+`outputs/<dagster-run-id>/<rollout>/`. The final Dagster step upserts every
+rollout into the queryable cross-run database at `outputs/results.sqlite`.
+No separate flat results file is created.

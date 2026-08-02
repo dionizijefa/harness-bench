@@ -1,0 +1,18 @@
+ops:
+  plan_rollouts:
+    config:
+      harnesses:
+        - id: codex
+        - id: opencode
+        - id: pi
+        - id: omp_agent
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      remote:
+        host: terminal-bench
+        project_dir: /home/REMOTE_USER/harness-bloat-bench
+        copy_artifacts: true
+
+execution:
+  config:
+    max_concurrent: 4

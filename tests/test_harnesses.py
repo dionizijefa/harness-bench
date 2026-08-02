@@ -35,7 +35,7 @@ def trace(prompt: str = "Fix the tests", system_prompt: str = "Be precise"):
 
 
 def context():
-    return SimpleNamespace(model="qwen/qwen3.7-max")
+    return SimpleNamespace(model="deepseek/deepseek-v4-flash-latest")
 
 
 def test_opencode_launch_uses_isolated_inline_config() -> None:

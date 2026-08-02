@@ -1,6 +1,10 @@
 import asyncio
 import datetime as dt
 import json
+import os
+import shlex
+import sqlite3
+import subprocess
 import time
 from collections.abc import Iterator
 from itertools import product
@@ -20,6 +24,7 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "pi": "0.80.7",
     "omp_agent": "16.5.2",
 }
+REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 
 
 class HarnessSpec(dg.Config):
@@ -27,8 +32,34 @@ class HarnessSpec(dg.Config):
     version: str | None = None
 
 
+class SSHExecutionConfig(dg.Config):
+    host: str
+    project_dir: str
+    ssh_options: list[str] = []
+    copy_artifacts: bool = True
+
+
+def _configured_remote() -> dict | None:
+    config_path = os.environ.get("HARNESS_BLOAT_REMOTE_CONFIG")
+    if not config_path or not Path(config_path).is_file():
+        return None
+    try:
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot load remote config {config_path}: {error}") from error
+    if not isinstance(config, dict):
+        raise RuntimeError(f"remote config {config_path} must contain a JSON object")
+    return config
+
+
+def _remote_dict(remote: SSHExecutionConfig | dict | None) -> dict | None:
+    if remote is None:
+        return None
+    return remote if isinstance(remote, dict) else remote.model_dump()
+
+
 class MatrixConfig(dg.Config):
-    models: list[str] = ["qwen/qwen3.7-max"]
+    models: list[str] = ["deepseek/deepseek-v4-flash-latest"]
     # Empty means the default Codex harness. Dagster requires nested-config list
     # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
     harnesses: list[HarnessSpec] = []
@@ -46,6 +77,7 @@ class MatrixConfig(dg.Config):
     rollout_retries: int = 0
     output_dir: str = "outputs"
     dry_run: bool = False
+    remote: SSHExecutionConfig | None = _configured_remote()
 
 
 def _harness_specs(config: MatrixConfig) -> list[tuple[HarnessId, str]]:
@@ -76,6 +108,13 @@ def _task_ids(config: MatrixConfig) -> list[str]:
     requested = list(
         dict.fromkeys(task_id.rsplit("/", 1)[-1] for task_id in config.task_ids)
     )
+    if config.remote is not None:
+        if not requested:
+            raise dg.Failure(
+                "remote execution requires explicit task_ids; task discovery runs "
+                "on the local Dagster host"
+            )
+        return requested
     if config.dry_run and requested:
         return requested
     taskset = HarborTaskset(
@@ -122,6 +161,7 @@ def plan_rollouts(
                 "rollout_retries": config.rollout_retries,
                 "output_dir": config.output_dir,
                 "dry_run": config.dry_run,
+                "remote": _remote_dict(config.remote),
             },
             mapping_key=key,
             metadata={
@@ -172,11 +212,11 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
     )
 
 
-@dg.op(pool="rollouts")
-def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
-    output_dir = Path(spec["output_dir"]) / context.run_id / spec["key"]
+def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
+    output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
     base = {
-        "dagster_run_id": context.run_id,
+        "dagster_run_id": dagster_run_id,
+        "rollout_key": spec["key"],
         "model": spec["model"],
         "harness": spec["harness"],
         "harness_version": spec["harness_version"],
@@ -214,36 +254,223 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
         "output_tokens": usage.completion_tokens if usage else trace.num_output_tokens,
         "total_tokens": usage.total_tokens if usage else trace.num_total_tokens,
     }
-    context.add_output_metadata(
-        {
-            "task": spec["task_id"],
-            "reward": reward,
-            "passed": row["passed"],
-            "trace": dg.MetadataValue.path(str(output_dir / "traces.jsonl")),
-        }
-    )
     return row
+
+
+def _ssh_command(remote: dict, command: str) -> list[str]:
+    return ["ssh", *remote["ssh_options"], "--", remote["host"], command]
+
+
+def _copy_remote_artifacts(
+    context: dg.OpExecutionContext,
+    remote: dict,
+    remote_output_dir: str,
+    local_output_dir: Path,
+) -> None:
+    local_output_dir.mkdir(parents=True, exist_ok=True)
+    context.log.info("Copying remote artifacts into %s", local_output_dir)
+    remote_command = (
+        f"cd {shlex.quote(remote['project_dir'])} && "
+        f"tar -C {shlex.quote(remote_output_dir)} -cf - ."
+    )
+    ssh_process = subprocess.Popen(
+        _ssh_command(remote, remote_command),
+        stdout=subprocess.PIPE,
+    )
+    assert ssh_process.stdout is not None
+    tar_process = subprocess.run(
+        ["tar", "-xf", "-", "-C", str(local_output_dir)],
+        stdin=ssh_process.stdout,
+        capture_output=True,
+        text=False,
+    )
+    ssh_process.stdout.close()
+    ssh_return_code = ssh_process.wait()
+    if ssh_return_code != 0 or tar_process.returncode != 0:
+        detail = tar_process.stderr.decode(errors="replace").strip()
+        raise dg.Failure(
+            "remote rollout finished, but artifact transfer failed: "
+            f"ssh={ssh_return_code}, tar={tar_process.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
+    remote = spec["remote"]
+    remote_command = (
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        f"cd {shlex.quote(remote['project_dir'])} && "
+        "exec uv run python -u -m harness_bloat_bench.remote_worker"
+    )
+    request = {"dagster_run_id": context.run_id, "spec": spec}
+    if api_key := os.environ.get(spec["api_key_var"]):
+        request["api_key"] = api_key
+
+    context.log.info("Starting rollout on SSH host %s", remote["host"])
+    process = subprocess.Popen(
+        _ssh_command(remote, remote_command),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    row = None
+    try:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(request))
+        process.stdin.close()
+        assert process.stdout is not None
+        for line in process.stdout:
+            text = line.rstrip()
+            if text.startswith(REMOTE_RESULT_PREFIX):
+                row = json.loads(text.removeprefix(REMOTE_RESULT_PREFIX))
+            elif text:
+                context.log.info("[%s] %s", remote["host"], text)
+        return_code = process.wait()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+
+    if return_code != 0:
+        raise dg.Failure(
+            f"remote rollout on {remote['host']} exited with code {return_code}"
+        )
+    if row is None:
+        raise dg.Failure("remote rollout exited without returning a result")
+
+    remote_output_dir = row["output_dir"]
+    local_output_dir = Path(spec["output_dir"]) / context.run_id / spec["key"]
+    if remote["copy_artifacts"] and not spec["dry_run"]:
+        _copy_remote_artifacts(
+            context, remote, remote_output_dir, local_output_dir
+        )
+    row["remote_output_dir"] = remote_output_dir
+    row["output_dir"] = str(local_output_dir)
+    return row
+
+
+@dg.op(pool="rollouts")
+def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
+    row = (
+        _run_remote_rollout(context, spec)
+        if spec.get("remote")
+        else _execute_rollout(spec, context.run_id)
+    )
+    if not spec["dry_run"]:
+        metadata = {
+            "task": spec["task_id"],
+            "reward": row["reward"],
+            "passed": row["passed"],
+        }
+        if spec.get("remote") and not spec["remote"]["copy_artifacts"]:
+            metadata["remote_trace"] = dg.MetadataValue.text(
+                f"{spec['remote']['host']}:{row['remote_output_dir']}/traces.jsonl"
+            )
+        else:
+            metadata["trace"] = dg.MetadataValue.path(
+                str(Path(row["output_dir"]) / "traces.jsonl")
+            )
+        context.add_output_metadata(metadata)
+    return row
+
+
+def _write_results_db(rows: list[dict], output_root: Path) -> Path:
+    path = output_root / "results.sqlite"
+    connection = sqlite3.connect(path, timeout=30)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        with connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS rollout_results (
+                    dagster_run_id TEXT NOT NULL,
+                    rollout_key TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    harness TEXT NOT NULL,
+                    harness_version TEXT NOT NULL,
+                    dataset TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    rollout INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    passed INTEGER,
+                    reward REAL,
+                    runtime_seconds REAL,
+                    input_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    trace_id TEXT,
+                    output_dir TEXT NOT NULL,
+                    remote_output_dir TEXT,
+                    row_json TEXT NOT NULL,
+                    PRIMARY KEY (dagster_run_id, rollout_key)
+                );
+                CREATE INDEX IF NOT EXISTS rollout_results_lookup
+                    ON rollout_results (model, harness, task_id, status);
+                """
+            )
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO rollout_results (
+                    dagster_run_id, rollout_key, timestamp, model, harness,
+                    harness_version, dataset, task_id, rollout, status, passed,
+                    reward, runtime_seconds, input_tokens, cached_input_tokens,
+                    output_tokens, total_tokens, trace_id, output_dir,
+                    remote_output_dir, row_json
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    (
+                        row["dagster_run_id"],
+                        row["rollout_key"],
+                        row["timestamp"],
+                        row["model"],
+                        row["harness"],
+                        row["harness_version"],
+                        row["dataset"],
+                        row["task_id"],
+                        row["rollout"],
+                        row["status"],
+                        None if row.get("passed") is None else int(row["passed"]),
+                        row.get("reward"),
+                        row.get("runtime_seconds"),
+                        row.get("input_tokens"),
+                        row.get("cached_input_tokens"),
+                        row.get("output_tokens"),
+                        row.get("total_tokens"),
+                        row.get("trace_id"),
+                        row["output_dir"],
+                        row.get("remote_output_dir"),
+                        json.dumps(row, sort_keys=True),
+                    )
+                    for row in rows
+                ],
+            )
+    finally:
+        connection.close()
+    return path
 
 
 @dg.op
 def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
     if not rows:
         raise dg.Failure("no rollout results were produced")
-    output_dir = Path(rows[0]["output_dir"]).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.jsonl"
-    path.write_text(
-        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
+    run_dir = Path(rows[0]["output_dir"]).parent
+    database_path = _write_results_db(rows, run_dir.parent)
     context.add_output_metadata(
         {
-            "path": dg.MetadataValue.path(str(path)),
+            "database": dg.MetadataValue.path(str(database_path)),
+            "dagster_run_id": rows[0]["dagster_run_id"],
             "rollouts": len(rows),
             "passed": sum(row.get("passed") is True for row in rows),
         }
     )
-    return str(path)
+    return str(database_path)
 
 
 @dg.job(executor_def=dg.multiprocess_executor)

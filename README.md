@@ -1,118 +1,66 @@
 # harness-bloat-bench
 
-Minimal runner for Codex CLI harness comparisons on Terminal-Bench 2.1 through
-Harbor.
+Terminal-Bench 2.1 rollouts using [Prime Intellect Verifiers v1](https://github.com/PrimeIntellect-ai/verifiers) with Dagster as the control plane.
 
-The repo is configured for OpenRouter-backed Codex CLI runs and requires:
+Each dynamically mapped `run_rollout` step is exactly one Verifiers rollout. Verifiers supplies the Harbor taskset, selected coding harness, Docker/Prime runtime, scoring, retry policy, and trace format; Dagster supplies scheduling, concurrency, re-execution, logs, and observability.
+
+## Run
 
 ```sh
+uv sync
 export OPENROUTER_API_KEY=sk-or-...
+mkdir -p .dagster
+export DAGSTER_HOME="$PWD/.dagster"
+uv run dagster instance concurrency set rollouts 4
+uv run dagster dev -m harness_bloat_bench.definitions
 ```
 
-Example Qwen3.7 Max run:
+Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the Launchpad:
+
+```yaml
+ops:
+  plan_rollouts:
+    config:
+      models: [qwen/qwen3.7-max]
+      harnesses:
+        - id: codex
+        - id: opencode
+        - id: pi
+        - id: omp_agent
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 5
+
+execution:
+  config:
+    max_concurrent: 4
+```
+
+The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is the per-run process limit.
+
+`harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex `0.137.0`, OpenCode `1.18.1`, Pi `0.80.7`, and OMP `16.5.2`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. The old `harness_versions` list remains accepted for Codex-only configs.
+
+The adapters install the official Linux release artifacts inside each rollout sandbox and route their OpenAI-compatible calls through Verifiers interception. OpenCode and OMP retain their stock coding-agent surfaces and support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. See the upstream [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), and [OMP repository](https://github.com/can1357/oh-my-pi) for the underlying behavior.
+
+The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.
+
+To let Dagster expand every task in the dataset, set `task_ids: []`. To verify the graph without Docker or model calls, set `dry_run: true` and provide at least one task ID.
+
+Headless execution uses the same run config:
 
 ```sh
-uv run python run_matrix.py \
-  --harness codex-cli \
-  --harness-versions latest \
-  --models qwen/qwen3.7-max \
-  --task-ids adaptive-rejection-sampler \
-  --n-attempts 5
+uv run dagster job execute \
+  -m harness_bloat_bench.definitions \
+  -j terminal_bench_rollouts \
+  -c run_config.yaml
 ```
 
-By default this runs:
+A checked-in smoke config exercises the full Dagster control plane without model or Docker calls:
 
 ```sh
-harbor run -d terminal-bench/terminal-bench-2-1
+uv run dagster job execute \
+  -m harness_bloat_bench.definitions \
+  -j terminal_bench_rollouts \
+  -c configs/dry-run.yaml
 ```
 
-Use `--task-ids adaptive-rejection-sampler` to run a subset. Short
-Terminal-Bench task IDs are expanded to Harbor task names such as
-`terminal-bench/adaptive-rejection-sampler`.
-
-Smoke verification:
-
-```sh
-scripts/run_smoke_task.sh
-```
-
-This runs a dry-run for `crack-7z-hash`, the shortest
-`terminal-bench/terminal-bench-2-1` task by instruction length in the downloaded
-Harbor task set. To run it live through OpenRouter:
-
-```sh
-scripts/run_smoke_task.sh --live
-```
-
-OpenRouter is enabled by default. The runner maps `OPENROUTER_API_KEY` to
-`OPENAI_API_KEY`, sets `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and uses
-a local Harbor Codex agent shim so the full OpenRouter model id
-`qwen/qwen3.7-max` is passed to `codex exec`.
-
-Results are exported after every Harbor job to:
-
-- `outputs/results.json`
-- `outputs/results.jsonl`
-- `outputs/results.csv`
-
-Each row is one Terminal-Bench trial/task attempt and includes task id, pass
-status, runtime, log paths, input tokens, cached input tokens, output tokens,
-total tokens, estimated or reported cost, model, harness version, Harbor run id,
-and the exact command. These files are intended to be directly loadable from
-pandas or plotting scripts.
-
-Use `--dry-run` to verify the Harbor command and output schema without running
-Terminal-Bench or requiring an API key.
-
-## Resource-aware task scheduling
-
-`schedule_harbor_tasks.py` runs selected Terminal-Bench 2 / Harbor tasks through
-a lightweight host resource scheduler. It discovers local `task.toml` files, or
-downloads a Harbor dataset first, extracts `[environment]` and
-`[verifier.environment]` resource settings, and starts one isolated Harbor job per
-admitted task with `--n-concurrent 1`.
-
-Dry-run a subset:
-
-```sh
-uv run python schedule_harbor_tasks.py \
-  --dataset terminal-bench/terminal-bench-2-1 \
-  --include 'terminal-bench/crack-7z-hash' \
-  --model qwen/qwen3.7-max \
-  --total-cpus 64 \
-  --total-memory 128GB \
-  --reserve-cpus 4 \
-  --reserve-memory 16GB \
-  --dry-run
-```
-
-Live runs use Harbor CPU and memory enforcement via `--cpus limit`,
-`--memory limit`, `--override-cpus`, and `--override-memory`. The scheduler also
-passes thread-limiting variables into the task environment and verifier:
-`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`,
-`NUMEXPR_NUM_THREADS`, `RAYON_NUM_THREADS`, and `MAKEFLAGS`.
-
-OpenRouter is enabled by default, matching `run_matrix.py`; the scheduler uses
-`harness_bloat_bench.openrouter_codex:OpenRouterCodex` automatically for the
-default Codex agent.
-
-Scheduler results are written by default to:
-
-- `outputs/scheduler/results.json`
-- `outputs/scheduler/results.csv`
-
-The scheduler also writes live state to `outputs/scheduler/state.json`. This
-tracks selected, pending, running, skipped, and completed tasks for UI polling.
-
-## Web UI
-
-Start the local dashboard:
-
-```sh
-uv run python -m harness_bloat_bench.ui_server --host 127.0.0.1 --port 8765
-```
-
-Then open <http://127.0.0.1:8765>. The UI spawns
-`schedule_harbor_tasks.py` runs in isolated directories under
-`outputs/ui_runs/`, polls each run's `state.json`, and displays scheduler logs,
-resource usage, progress, and result rows as tasks finish.
+Verifiers writes `config.toml` and `traces.jsonl` beneath `outputs/<dagster-run-id>/<rollout>/`. The final Dagster step writes the flat benchmark table to `outputs/<dagster-run-id>/results.jsonl`.

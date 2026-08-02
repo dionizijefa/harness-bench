@@ -1,0 +1,17 @@
+ops:
+  plan_rollouts:
+    config:
+      models: [dry-run-model]
+      harnesses:
+        - id: codex
+        - id: opencode
+        - id: pi
+        - id: omp_agent
+      task_ids: [crack-7z-hash]
+      num_rollouts: 2
+      output_dir: outputs/dry-run
+      dry_run: true
+
+execution:
+  config:
+    max_concurrent: 2

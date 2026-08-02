@@ -1,1 +1,1 @@
-"""Local Harbor helpers for harness-bloat-bench."""
+"""Terminal-Bench rollouts orchestrated by Dagster."""

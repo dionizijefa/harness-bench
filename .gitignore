@@ -1,6 +1,9 @@
 .DS_Store
 .venv
+.pytest_cache/
 .ruff_cache/
+.dagster/*
+!.dagster/dagster.yaml
 __pycache__/
 *.py[cod]
 outputs/

@@ -25,6 +25,8 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "omp_agent": "16.5.2",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
+RUN_TYPE_TAG = "harness_bloat/run_type"
+DRY_RUN_TAG = "harness_bloat/dry_run"
 
 
 class HarnessSpec(dg.Config):
@@ -80,6 +82,13 @@ class MatrixConfig(dg.Config):
     remote: SSHExecutionConfig | None = _configured_remote()
 
 
+def _classification_tags(dry_run: bool) -> dict[str, str]:
+    return {
+        RUN_TYPE_TAG: "test" if dry_run else "real",
+        DRY_RUN_TAG: str(dry_run).lower(),
+    }
+
+
 def _harness_specs(config: MatrixConfig) -> list[tuple[HarnessId, str]]:
     if config.harness_versions:
         default_only = not config.harnesses or (
@@ -131,6 +140,10 @@ def _task_ids(config: MatrixConfig) -> list[str]:
 def plan_rollouts(
     context: dg.OpExecutionContext, config: MatrixConfig
 ) -> Iterator[dg.DynamicOutput[dict]]:
+    run_tags = _classification_tags(config.dry_run)
+    context.instance.add_run_tags(context.run_id, run_tags)
+    context.log.info("Classified Dagster run as %s", run_tags[RUN_TYPE_TAG])
+
     if config.num_rollouts < 1:
         raise dg.Failure("num_rollouts must be at least 1")
 

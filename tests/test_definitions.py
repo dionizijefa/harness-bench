@@ -8,8 +8,11 @@ import pytest
 from verifiers.v1.types import Usage
 
 from harness_bloat_bench.definitions import (
+    DRY_RUN_TAG,
+    RUN_TYPE_TAG,
     MatrixConfig,
     SSHExecutionConfig,
+    _classification_tags,
     _configured_remote,
     _eval_config,
     _hard_failure_row,
@@ -22,7 +25,9 @@ from harness_bloat_bench.definitions import (
 
 
 def test_dry_run_matrix(tmp_path: Path) -> None:
+    instance = dg.DagsterInstance.ephemeral()
     result = terminal_bench_rollouts.execute_in_process(
+        instance=instance,
         run_config={
             "ops": {
                 "plan_rollouts": {
@@ -40,6 +45,10 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     )
 
     assert result.success
+    run = instance.get_run_by_id(result.run_id)
+    assert run is not None
+    assert run.tags[RUN_TYPE_TAG] == "test"
+    assert run.tags[DRY_RUN_TAG] == "true"
     database_path = Path(result.output_for_node("write_results"))
     assert database_path == tmp_path / "results.sqlite"
     with sqlite3.connect(database_path) as connection:
@@ -56,6 +65,13 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
         ("model-b", "task-a", "dry_run"),
         ("model-b", "task-a", "dry_run"),
     ]
+
+
+def test_real_runs_get_real_classification_tags() -> None:
+    assert _classification_tags(False) == {
+        RUN_TYPE_TAG: "real",
+        DRY_RUN_TAG: "false",
+    }
 
 
 def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:

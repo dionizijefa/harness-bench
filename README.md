@@ -40,6 +40,12 @@ execution:
 
 The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is the per-run process limit.
 
+Every run is automatically labeled in Dagster from its actual configuration:
+`harness_bloat/run_type=test` when `dry_run: true`, and
+`harness_bloat/run_type=real` otherwise. These tags appear on the run and can
+be selected in the Runs page tag filter. The companion
+`harness_bloat/dry_run=true|false` tag is also attached for explicit filtering.
+
 `harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex `0.137.0`, OpenCode `1.18.1`, Pi `0.80.7`, and OMP `16.5.2`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. The old `harness_versions` list remains accepted for Codex-only configs.
 
 The adapters install the official Linux release artifacts inside each rollout sandbox and route their OpenAI-compatible calls through Verifiers interception. OpenCode and OMP retain their stock coding-agent surfaces and support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. See the upstream [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), and [OMP repository](https://github.com/can1357/oh-my-pi) for the underlying behavior.

@@ -17,6 +17,12 @@ from verifiers.v1.configs.eval import EvalConfig
 from verifiers.v1.env import Environment
 from verifiers.v1.tasksets.harbor import HarborConfig, HarborTaskset
 
+from harness_bloat_bench.resource_monitor import (
+    consume_resource_usage,
+    enable_docker_resource_monitoring,
+    reset_resource_usage,
+)
+
 HarnessId = Literal["codex", "opencode", "pi", "omp_agent"]
 DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "codex": "0.137.0",
@@ -72,6 +78,8 @@ class MatrixConfig(dg.Config):
     num_rollouts: int = 1
     dataset: str = "terminal-bench/terminal-bench-2-1"
     runtime: Literal["docker", "prime"] = "docker"
+    container_cpus: float | None = 10.0
+    container_memory_gb: float | None = 18.0
     base_url: str = "https://openrouter.ai/api/v1"
     api_key_var: str = "OPENROUTER_API_KEY"
     max_tokens: int | None = None
@@ -146,6 +154,11 @@ def plan_rollouts(
 
     if config.num_rollouts < 1:
         raise dg.Failure("num_rollouts must be at least 1")
+    if config.runtime == "docker":
+        if config.container_cpus is not None and config.container_cpus <= 0:
+            raise dg.Failure("container_cpus must be positive or null")
+        if config.container_memory_gb is not None and config.container_memory_gb <= 0:
+            raise dg.Failure("container_memory_gb must be positive or null")
 
     cases = product(
         config.models,
@@ -167,6 +180,8 @@ def plan_rollouts(
                 "rollout": rollout,
                 "dataset": config.dataset,
                 "runtime": config.runtime,
+                "container_cpus": config.container_cpus,
+                "container_memory_gb": config.container_memory_gb,
                 "base_url": config.base_url,
                 "api_key_var": config.api_key_var,
                 "max_tokens": config.max_tokens,
@@ -193,6 +208,13 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
     sampling = {
         key: spec[key] for key in ("max_tokens", "temperature") if spec[key] is not None
     }
+    runtime = {"type": spec["runtime"]}
+    if spec["runtime"] == "docker":
+        if spec.get("container_cpus") is not None:
+            runtime["cpu"] = spec["container_cpus"]
+        if spec.get("container_memory_gb") is not None:
+            runtime["memory"] = spec["container_memory_gb"]
+
     return EvalConfig.model_validate(
         {
             "model": spec["model"],
@@ -210,7 +232,7 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
             "harness": {
                 "id": spec.get("harness", "codex"),
                 "version": spec["harness_version"],
-                "runtime": {"type": spec["runtime"]},
+                "runtime": runtime,
             },
             "retries": {
                 "rollout": {"max_retries": spec["rollout_retries"]},
@@ -236,6 +258,12 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         "dataset": spec["dataset"],
         "task_id": spec["task_id"],
         "rollout": spec["rollout"],
+        "container_cpu_limit": (
+            spec.get("container_cpus") if spec["runtime"] == "docker" else None
+        ),
+        "container_memory_limit_gb": (
+            spec.get("container_memory_gb") if spec["runtime"] == "docker" else None
+        ),
         "output_dir": str(output_dir),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
@@ -243,6 +271,9 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         return {**base, "status": "dry_run", "passed": None, "reward": None}
 
     started = time.perf_counter()
+    reset_resource_usage()
+    if spec["runtime"] == "docker":
+        enable_docker_resource_monitoring()
     traces = asyncio.run(
         run_eval(
             Environment(config := _eval_config(spec, output_dir)),
@@ -262,6 +293,7 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         "error": error,
         "runtime_seconds": time.perf_counter() - started,
         **_trace_usage_fields(trace),
+        **consume_resource_usage(),
     }
     return row
 
@@ -305,6 +337,14 @@ def _hard_failure_row(
         "dataset": spec["dataset"],
         "task_id": spec["task_id"],
         "rollout": spec["rollout"],
+        "container_cpu_limit": (
+            spec.get("container_cpus") if spec.get("runtime") == "docker" else None
+        ),
+        "container_memory_limit_gb": (
+            spec.get("container_memory_gb")
+            if spec.get("runtime") == "docker"
+            else None
+        ),
         "output_dir": str(output_dir),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "status": "error",
@@ -321,6 +361,13 @@ def _hard_failure_row(
         "model_call_count": None,
         "usage_source": None,
         "cost_usd": None,
+        "resource_usage_source": None,
+        "cpu_seconds": None,
+        "peak_memory_bytes": None,
+        "io_read_bytes": None,
+        "io_write_bytes": None,
+        "peak_pids": None,
+        "oom_kill_count": None,
     }
 
 
@@ -444,8 +491,22 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
             "task": spec["task_id"],
             "reward": row["reward"],
             "passed": row["passed"],
+            "container_cpu_limit": row.get("container_cpu_limit"),
+            "container_memory_limit_gb": row.get("container_memory_limit_gb"),
             "database": dg.MetadataValue.path(str(database_path)),
         }
+        if row.get("resource_usage_source"):
+            metadata.update(
+                {
+                    "cpu_seconds": row.get("cpu_seconds"),
+                    "peak_memory_gib": row.get("peak_memory_bytes", 0)
+                    / (1024**3),
+                    "io_read_bytes": row.get("io_read_bytes"),
+                    "io_write_bytes": row.get("io_write_bytes"),
+                    "peak_pids": row.get("peak_pids"),
+                    "oom_kill_count": row.get("oom_kill_count"),
+                }
+            )
         if spec.get("remote") and not spec["remote"]["copy_artifacts"]:
             metadata["remote_trace"] = dg.MetadataValue.text(
                 f"{spec['remote']['host']}:{row['remote_output_dir']}/traces.jsonl"
@@ -489,6 +550,15 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                     model_call_count INTEGER,
                     usage_source TEXT,
                     cost_usd REAL,
+                    container_cpu_limit REAL,
+                    container_memory_limit_gb REAL,
+                    resource_usage_source TEXT,
+                    cpu_seconds REAL,
+                    peak_memory_bytes INTEGER,
+                    io_read_bytes INTEGER,
+                    io_write_bytes INTEGER,
+                    peak_pids INTEGER,
+                    oom_kill_count INTEGER,
                     trace_id TEXT,
                     error_type TEXT,
                     error_message TEXT,
@@ -512,6 +582,15 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 "cost_usd": "REAL",
                 "error_type": "TEXT",
                 "error_message": "TEXT",
+                "container_cpu_limit": "REAL",
+                "container_memory_limit_gb": "REAL",
+                "resource_usage_source": "TEXT",
+                "cpu_seconds": "REAL",
+                "peak_memory_bytes": "INTEGER",
+                "io_read_bytes": "INTEGER",
+                "io_write_bytes": "INTEGER",
+                "peak_pids": "INTEGER",
+                "oom_kill_count": "INTEGER",
             }.items():
                 if column not in existing_columns:
                     connection.execute(
@@ -540,6 +619,15 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 "model_call_count",
                 "usage_source",
                 "cost_usd",
+                "container_cpu_limit",
+                "container_memory_limit_gb",
+                "resource_usage_source",
+                "cpu_seconds",
+                "peak_memory_bytes",
+                "io_read_bytes",
+                "io_write_bytes",
+                "peak_pids",
+                "oom_kill_count",
                 "trace_id",
                 "error_type",
                 "error_message",
@@ -593,6 +681,15 @@ def _database_values(row: dict) -> tuple:
         row.get("model_call_count"),
         row.get("usage_source"),
         row.get("cost_usd"),
+        row.get("container_cpu_limit"),
+        row.get("container_memory_limit_gb"),
+        row.get("resource_usage_source"),
+        row.get("cpu_seconds"),
+        row.get("peak_memory_bytes"),
+        row.get("io_read_bytes"),
+        row.get("io_write_bytes"),
+        row.get("peak_pids"),
+        row.get("oom_kill_count"),
         row.get("trace_id"),
         error_type,
         error_message,
@@ -614,14 +711,28 @@ def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
         raise dg.Failure("no rollout results were produced")
     run_dir = Path(rows[0]["output_dir"]).parent
     database_path = _write_results_db(rows, run_dir.parent)
-    context.add_output_metadata(
-        {
-            "database": dg.MetadataValue.path(str(database_path)),
-            "dagster_run_id": rows[0]["dagster_run_id"],
-            "rollouts": len(rows),
-            "passed": sum(row.get("passed") is True for row in rows),
-        }
-    )
+    measured = [row for row in rows if row.get("resource_usage_source")]
+    metadata = {
+        "database": dg.MetadataValue.path(str(database_path)),
+        "dagster_run_id": rows[0]["dagster_run_id"],
+        "rollouts": len(rows),
+        "passed": sum(row.get("passed") is True for row in rows),
+    }
+    if measured:
+        metadata.update(
+            {
+                "measured_rollouts": len(measured),
+                "total_cpu_seconds": sum(row.get("cpu_seconds", 0) for row in measured),
+                "max_peak_memory_gib": max(
+                    row.get("peak_memory_bytes", 0) for row in measured
+                )
+                / (1024**3),
+                "total_oom_kills": sum(
+                    row.get("oom_kill_count", 0) for row in measured
+                ),
+            }
+        )
+    context.add_output_metadata(metadata)
     return str(database_path)
 
 

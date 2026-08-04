@@ -22,6 +22,7 @@ from harness_bloat_bench.definitions import (
     _trace_usage_fields,
     terminal_bench_rollouts,
 )
+from harness_bloat_bench.resource_monitor import _read_cgroup_usage
 
 
 def test_dry_run_matrix(tmp_path: Path) -> None:
@@ -205,6 +206,8 @@ def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
             "task_id": "crack-7z-hash",
             "harness_version": "0.137.0",
             "runtime": "docker",
+            "container_cpus": 10.0,
+            "container_memory_gb": 18.0,
             "rollout_retries": 0,
             "max_tokens": None,
             "temperature": None,
@@ -216,6 +219,29 @@ def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     assert config.taskset.tasks == ["crack-7z-hash"]
     assert type(config.harness).__name__ == "CodexHarnessConfig"
     assert config.harness.runtime.type == "docker"
+    assert config.harness.runtime.cpu == 10.0
+    assert config.harness.runtime.memory == 18.0
+
+
+def test_cgroup_v2_resource_usage_is_aggregated(tmp_path: Path) -> None:
+    (tmp_path / "cpu.stat").write_text("usage_usec 2500000\nuser_usec 2000000\n")
+    (tmp_path / "memory.peak").write_text("1073741824\n")
+    (tmp_path / "memory.events").write_text("oom 2\noom_kill 1\n")
+    (tmp_path / "io.stat").write_text(
+        "8:0 rbytes=100 wbytes=200 rios=1 wios=2\n"
+        "8:16 rbytes=300 wbytes=400 rios=3 wios=4\n"
+    )
+    (tmp_path / "pids.peak").write_text("42\n")
+
+    assert _read_cgroup_usage(tmp_path) == {
+        "resource_usage_source": "cgroup_v2",
+        "cpu_seconds": 2.5,
+        "peak_memory_bytes": 1_073_741_824,
+        "io_read_bytes": 400,
+        "io_write_bytes": 600,
+        "peak_pids": 42,
+        "oom_kill_count": 1,
+    }
 
 
 @pytest.mark.parametrize(

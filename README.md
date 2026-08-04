@@ -32,13 +32,23 @@ ops:
         - id: omp_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 5
+      container_cpus: 10
+      container_memory_gb: 18
 
 execution:
   config:
-    max_concurrent: 4
+    max_concurrent: 6
 ```
 
-The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is the per-run process limit.
+The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is
+the per-run process limit. The UI launcher currently provides six global
+rollout slots. On the 64-thread / 125 GiB worker, Docker rollouts default to a
+hard limit of 10 CPUs and 18 GiB each. At six fully occupied slots this caps
+the benchmark workload at 60 CPU threads and 108 GiB, preserving host
+headroom. Override `container_cpus` or `container_memory_gb` in the Launchpad
+when the collected measurements justify a more aggressive profile. The
+ignored `.env` can override the global slot count with
+`HARNESS_BLOAT_ROLLOUT_SLOTS`; restart the launcher after changing it.
 
 Every run is automatically labeled in Dagster from its actual configuration:
 `harness_bloat/run_type=test` when `dry_run: true`, and
@@ -133,7 +143,12 @@ results file is created.
 The `rollout_results` table records the model, harness and exact harness
 version, dataset, task, rollout number, status, pass/fail result, reward,
 runtime, token usage, model-call count, provider-reported USD cost, trace ID,
-and error details. `usage_source` distinguishes complete provider usage from
+error details, configured container limits, cumulative container CPU time,
+peak container memory, disk I/O, peak process count, and OOM kills.
+`resource_usage_source=cgroup_v2` identifies measurements collected from the
+remote Docker container's kernel counters. These figures are also shown in
+each mapped `run_rollout` step's output metadata in Dagster; `write_results`
+shows run-level CPU, peak-memory, and OOM summaries. `usage_source` distinguishes complete provider usage from
 partial provider usage and trace-derived fallback counts. Cost and reasoning
 tokens remain `NULL` when the provider does not return them.
 
@@ -155,7 +170,16 @@ SELECT
   total_tokens,
   model_call_count,
   cost_usd,
-  usage_source
+  usage_source,
+  container_cpu_limit,
+  container_memory_limit_gb,
+  cpu_seconds,
+  ROUND(peak_memory_bytes / 1073741824.0, 2) AS peak_memory_gib,
+  io_read_bytes,
+  io_write_bytes,
+  peak_pids,
+  oom_kill_count,
+  resource_usage_source
 FROM rollout_results
 ORDER BY timestamp, harness, task_id, rollout;
 ```

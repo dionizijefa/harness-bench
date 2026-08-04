@@ -8,6 +8,8 @@ ops:
         - id: omp_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 1
+      container_cpus: 10
+      container_memory_gb: 18
       remote:
         host: terminal-bench
         project_dir: /home/REMOTE_USER/harness-bloat-bench
@@ -15,4 +17,4 @@ ops:
 
 execution:
   config:
-    max_concurrent: 4
+    max_concurrent: 6

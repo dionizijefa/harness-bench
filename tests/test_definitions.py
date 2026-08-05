@@ -298,6 +298,8 @@ def test_cgroup_v2_resource_usage_is_aggregated(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("harness", "version", "config_type"),
     [
+        ("codex_agent", "0.137.0", "CodexHarnessConfig"),
+        ("hermes_agent", "2026.8.3", "HermesAgentHarnessConfig"),
         ("opencode", "1.18.1", "OpenCodeHarnessConfig"),
         ("pi", "0.80.7", "PiHarnessConfig"),
         ("omp_agent", "16.5.2", "OmpAgentHarnessConfig"),
@@ -335,7 +337,8 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
                     "config": {
                         "models": ["model-a"],
                         "harnesses": [
-                            {"id": "codex"},
+                            {"id": "codex_agent"},
+                            {"id": "hermes_agent"},
                             {"id": "opencode"},
                             {"id": "pi"},
                             {"id": "omp_agent"},
@@ -358,7 +361,8 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
             ).fetchall()
         )
     assert harnesses == {
-        ("codex", "0.137.0"),
+        ("codex_agent", "0.137.0"),
+        ("hermes_agent", "2026.8.3"),
         ("opencode", "1.18.1"),
         ("pi", "0.80.7"),
         ("omp_agent", "16.5.2"),

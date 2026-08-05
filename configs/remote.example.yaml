@@ -2,7 +2,8 @@ ops:
   plan_rollouts:
     config:
       harnesses:
-        - id: codex
+        - id: codex_agent
+        - id: hermes_agent
         - id: opencode
         - id: pi
         - id: omp_agent

@@ -1,7 +1,16 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import get_args
 
+import pytest
+from harness_bloat_bench.definitions import DEFAULT_HARNESS_VERSIONS, HarnessId
+from harness_bloat_bench.harnesses.hermes_agent import (
+    HERMES_BIN,
+    HermesAgentHarness,
+    HermesAgentHarnessConfig,
+    _install_script as hermes_install_script,
+)
 from harness_bloat_bench.harnesses.omp_agent import (
     OMP_BIN,
     OmpAgentHarness,
@@ -13,13 +22,19 @@ from harness_bloat_bench.harnesses.opencode import (
     OpenCodeHarnessConfig,
 )
 from harness_bloat_bench.harnesses.pi import PI_BIN, PiHarness, PiHarnessConfig
+from verifiers.v1.loaders import harness_config_type, load_harness
 from verifiers.v1.runtimes import ProgramResult
 
 
 class FakeRuntime:
     def __init__(self) -> None:
         self.writes: dict[str, bytes] = {}
+        self.commands: list[tuple[list[str], dict[str, str]]] = []
         self.program: tuple[list[str], dict[str, str]] | None = None
+
+    async def run(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
+        self.commands.append((argv, env))
+        return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def write(self, path: str, data: bytes) -> None:
         self.writes[path] = data
@@ -31,11 +46,62 @@ class FakeRuntime:
 
 def trace(prompt: str = "Fix the tests", system_prompt: str = "Be precise"):
     data = SimpleNamespace(prompt=prompt, system_prompt=system_prompt)
-    return SimpleNamespace(id="trace-123", task=SimpleNamespace(data=data))
+    rollout_trace = SimpleNamespace(
+        id="trace-123",
+        task=SimpleNamespace(data=data),
+        stop_condition=None,
+        stop_reason=None,
+    )
+    rollout_trace.stop = lambda reason: setattr(rollout_trace, "stop_reason", reason)
+    return rollout_trace
 
 
 def context():
-    return SimpleNamespace(model="~deepseek/deepseek-v4-flash-latest")
+    return SimpleNamespace(
+        model="~deepseek/deepseek-v4-flash-latest",
+        sampling=SimpleNamespace(reasoning_effort=None),
+    )
+
+
+def test_every_declared_harness_has_a_default_version() -> None:
+    assert set(get_args(HarnessId)) == set(DEFAULT_HARNESS_VERSIONS)
+
+
+@pytest.mark.parametrize("harness_id", get_args(HarnessId))
+def test_every_harness_resolves_sets_up_and_runs(harness_id: str) -> None:
+    """Exercise the production plugin boundary without network or model calls."""
+    runtime = FakeRuntime()
+    rollout_trace = trace()
+    config_class = harness_config_type(harness_id)
+    config = config_class.model_validate(
+        {"id": harness_id, "version": DEFAULT_HARNESS_VERSIONS[harness_id]}
+    )
+    harness = load_harness(config)
+    mcp_urls = (
+        {"task-tools": "http://127.0.0.1:9001/mcp"}
+        if harness.SUPPORTS_MCP
+        else {}
+    )
+
+    async def exercise() -> None:
+        await harness.setup(runtime)
+        await harness.run(
+            context(),
+            rollout_trace,
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            mcp_urls,
+        )
+
+    asyncio.run(exercise())
+
+    assert rollout_trace.stop_reason == "agent_completed"
+    assert runtime.commands, f"{harness_id} setup did not invoke the runtime"
+    assert runtime.program is not None, f"{harness_id} did not launch a program"
+    argv, _ = runtime.program
+    assert argv and argv[0]
+    assert "session-secret" not in argv
 
 
 def test_opencode_launch_uses_isolated_inline_config() -> None:
@@ -135,3 +201,59 @@ def test_omp_launch_keeps_stock_agent_and_wires_mcp() -> None:
         "url": "http://127.0.0.1:9001/mcp",
     }
     assert env["PI_CODING_AGENT_DIR"] == "/tmp/vf-omp-agent-trace-123"
+
+
+def test_hermes_launch_uses_isolated_config_and_wires_mcp() -> None:
+    runtime = FakeRuntime()
+    harness = HermesAgentHarness(HermesAgentHarnessConfig(id="hermes_agent"))
+
+    asyncio.run(
+        harness.launch(
+            context(),
+            trace(),
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            {"task-tools": "http://127.0.0.1:9001/mcp"},
+        )
+    )
+
+    assert runtime.program is not None
+    argv, env = runtime.program
+    config_path = "/tmp/vf-hermes-agent-trace-123/config.yaml"
+    config = json.loads(runtime.writes[config_path])
+    assert argv[0] == HERMES_BIN
+    assert argv[:2] == [HERMES_BIN, "chat"]
+    assert argv[argv.index("--provider") + 1] == "custom"
+    assert argv[argv.index("--reasoning") + 1] == "medium"
+    assert argv[argv.index("--query") + 1] == "Fix the tests"
+    assert "--quiet" in argv
+    assert "--yolo" in argv
+    assert "session-secret" not in argv
+    assert config["model"] == {
+        "api_key": "${VF_INTERCEPT_KEY}",
+        "base_url": "http://127.0.0.1:9000/v1",
+        "context_length": 128_000,
+        "default": "~deepseek/deepseek-v4-flash-latest",
+        "max_tokens": 32_000,
+        "provider": "custom",
+    }
+    assert config["agent"]["system_prompt"] == "Be precise"
+    assert config["mcp_servers"]["task-tools"] == {
+        "enabled": True,
+        "url": "http://127.0.0.1:9001/mcp",
+    }
+    assert env["VF_INTERCEPT_KEY"] == "session-secret"
+    assert env["HERMES_HOME"] == "/tmp/vf-hermes-agent-trace-123"
+    assert "session-secret" not in runtime.writes[config_path].decode()
+
+
+def test_hermes_install_is_pinned_and_noninteractive() -> None:
+    script = hermes_install_script("v2026.8.3")
+
+    assert "hermes-agent/v$VERSION/scripts/install.sh" in script
+    assert '--branch "v$VERSION"' in script
+    assert "--skip-setup" in script
+    assert "--skip-browser" in script
+    assert "--no-skills" in script
+    assert "--non-interactive" in script

@@ -23,9 +23,18 @@ from harness_bloat_bench.resource_monitor import (
     reset_resource_usage,
 )
 
-HarnessId = Literal["codex", "opencode", "pi", "omp_agent"]
+HarnessId = Literal[
+    "codex",
+    "codex_agent",
+    "hermes_agent",
+    "opencode",
+    "pi",
+    "omp_agent",
+]
 DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "codex": "0.137.0",
+    "codex_agent": "0.137.0",
+    "hermes_agent": "2026.8.3",
     "opencode": "1.18.1",
     "pi": "0.80.7",
     "omp_agent": "16.5.2",

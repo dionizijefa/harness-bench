@@ -3,7 +3,8 @@ ops:
     config:
       models: [dry-run-model]
       harnesses:
-        - id: codex
+        - id: codex_agent
+        - id: hermes_agent
         - id: opencode
         - id: pi
         - id: omp_agent

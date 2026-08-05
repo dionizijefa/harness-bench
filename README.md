@@ -61,6 +61,11 @@ be selected in the Runs page tag filter. The companion
 
 `harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex Agent `0.137.0`, Hermes Agent `2026.8.3`, OpenCode `1.18.1`, Pi `0.80.7`, and OMP `16.5.2`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. `codex` remains an alias-compatible legacy ID, and the old `harness_versions` list remains accepted for Codex-only configs.
 
+`configs/opencode-versions.yaml` is a ready-to-run matrix spanning the selected
+OpenCode `0.1.x` through `1.18.x` releases. OpenCode `0.1.196` has no published
+binary; its upstream tag points at the same commit as `0.1.195`, so the adapter
+uses the official `0.1.195` artifact for that one matrix label.
+
 The adapters install the official Linux releases inside each rollout sandbox and route their OpenAI-compatible calls through Verifiers interception. Codex Agent uses Verifiers' stock Codex CLI adapter. Hermes Agent runs its headless chat surface with isolated state, coding tools, task system prompts, and remote task MCP servers. OpenCode and OMP retain their stock coding-agent surfaces and also support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. See the upstream [Codex CLI](https://github.com/openai/codex), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), and [OMP repository](https://github.com/can1357/oh-my-pi) for the underlying behavior.
 
 The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.

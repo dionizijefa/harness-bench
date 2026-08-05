@@ -4,11 +4,16 @@ from types import SimpleNamespace
 from typing import get_args
 
 import pytest
+from verifiers.v1.loaders import harness_config_type, load_harness
+from verifiers.v1.runtimes import ProgramResult
+
 from harness_bloat_bench.definitions import DEFAULT_HARNESS_VERSIONS, HarnessId
 from harness_bloat_bench.harnesses.hermes_agent import (
     HERMES_BIN,
     HermesAgentHarness,
     HermesAgentHarnessConfig,
+)
+from harness_bloat_bench.harnesses.hermes_agent import (
     _install_script as hermes_install_script,
 )
 from harness_bloat_bench.harnesses.omp_agent import (
@@ -21,9 +26,10 @@ from harness_bloat_bench.harnesses.opencode import (
     OpenCodeHarness,
     OpenCodeHarnessConfig,
 )
+from harness_bloat_bench.harnesses.opencode import (
+    _install_script as opencode_install_script,
+)
 from harness_bloat_bench.harnesses.pi import PI_BIN, PiHarness, PiHarnessConfig
-from verifiers.v1.loaders import harness_config_type, load_harness
-from verifiers.v1.runtimes import ProgramResult
 
 
 class FakeRuntime:
@@ -78,9 +84,7 @@ def test_every_harness_resolves_sets_up_and_runs(harness_id: str) -> None:
     )
     harness = load_harness(config)
     mcp_urls = (
-        {"task-tools": "http://127.0.0.1:9001/mcp"}
-        if harness.SUPPORTS_MCP
-        else {}
+        {"task-tools": "http://127.0.0.1:9001/mcp"} if harness.SUPPORTS_MCP else {}
     )
 
     async def exercise() -> None:
@@ -104,7 +108,7 @@ def test_every_harness_resolves_sets_up_and_runs(harness_id: str) -> None:
     assert "session-secret" not in argv
 
 
-def test_opencode_launch_uses_isolated_inline_config() -> None:
+def test_opencode_launch_uses_isolated_config() -> None:
     runtime = FakeRuntime()
     harness = OpenCodeHarness(
         OpenCodeHarnessConfig(id="opencode", disabled_tools=["websearch"])
@@ -123,10 +127,18 @@ def test_opencode_launch_uses_isolated_inline_config() -> None:
 
     assert runtime.program is not None
     argv, env = runtime.program
-    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    config_path = "/tmp/vf-opencode-state-trace-123/xdg-config/opencode/config.json"
+    config = json.loads(runtime.writes[config_path])
     assert argv[0] == OPENCODE_BIN
     assert argv[-1] == "Be precise\n\nFix the tests"
-    assert "--auto" in argv
+    assert argv == [
+        OPENCODE_BIN,
+        "run",
+        "--model",
+        "verifiers/model",
+        "--",
+        "Be precise\n\nFix the tests",
+    ]
     assert config["provider"]["verifiers"]["options"]["baseURL"].endswith("/v1")
     assert config["provider"]["verifiers"]["options"]["apiKey"] == (
         "{env:VF_INTERCEPT_KEY}"
@@ -134,7 +146,81 @@ def test_opencode_launch_uses_isolated_inline_config() -> None:
     assert config["tools"] == {"websearch": False}
     assert config["mcp"]["task-tools"]["type"] == "remote"
     assert env["VF_INTERCEPT_KEY"] == "session-secret"
-    assert "session-secret" not in env["OPENCODE_CONFIG_CONTENT"]
+    assert env["OPENCODE_CONFIG"] == config_path
+    assert b"session-secret" not in runtime.writes[config_path]
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.1.196",
+        "0.3.133",
+        "0.5.29",
+        "0.7.9",
+        "0.9.11",
+        "0.11.8",
+        "0.13.9",
+        "0.15.31",
+        "1.1.65",
+        "1.3.17",
+        "1.14.51",
+        "1.16.2",
+        "1.18.13",
+    ],
+)
+def test_requested_opencode_versions_use_pinned_npm_artifacts(version: str) -> None:
+    script = opencode_install_script(version)
+
+    assert "registry.npmjs.org/$package/-/$package-$ARTIFACT_VERSION.tgz" in script
+    assert f"VERSION={version}" in script
+    if version == "0.1.196":
+        assert "ARTIFACT_VERSION=0.1.195" in script
+    else:
+        assert f"ARTIFACT_VERSION={version}" in script
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_permission"),
+    [
+        ("0.1.196", None),
+        ("0.3.133", {"edit": "allow", "bash": "allow"}),
+        (
+            "0.5.29",
+            {"edit": "allow", "bash": "allow", "webfetch": "allow"},
+        ),
+        ("1.18.13", {"*": "allow"}),
+    ],
+)
+def test_opencode_config_tracks_versioned_schema(
+    version: str, expected_permission: dict[str, str] | None
+) -> None:
+    runtime = FakeRuntime()
+    harness = OpenCodeHarness(OpenCodeHarnessConfig(id="opencode", version=version))
+
+    asyncio.run(
+        harness.launch(
+            context(),
+            trace(),
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            {},
+        )
+    )
+
+    config_path = "/tmp/vf-opencode-state-trace-123/xdg-config/opencode/config.json"
+    config = json.loads(runtime.writes[config_path])
+    assert config.get("permission") == expected_permission
+    if version == "0.1.196":
+        assert config["autoshare"] is False
+        assert config["provider"]["verifiers"]["options"]["apiKey"] == (
+            "session-secret"
+        )
+    else:
+        assert config["share"] == "disabled"
+        assert config["provider"]["verifiers"]["options"]["apiKey"] == (
+            "{env:VF_INTERCEPT_KEY}"
+        )
 
 
 def test_pi_launch_uses_full_coding_toolset_and_ephemeral_state() -> None:

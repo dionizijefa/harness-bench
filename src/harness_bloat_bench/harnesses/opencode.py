@@ -25,17 +25,33 @@ logger = logging.getLogger(__name__)
 OPENCODE_DIR = "/tmp/vf-opencode"
 OPENCODE_BIN = f"{OPENCODE_DIR}/bin/opencode"
 
+# v0.1.196 and v0.1.195 point at the same upstream commit, but the v0.1.196
+# publish job did not produce GitHub or npm artifacts. Use the identical
+# v0.1.195 build while retaining v0.1.196 as the configured benchmark version.
+OPENCODE_ARTIFACT_ALIASES = {"0.1.196": "0.1.195"}
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    parts = release_version(version).split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"OpenCode version must be numeric semver: {version}")
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
 
 def _install_script(version: str) -> str:
     version = release_version(version)
+    artifact_version = OPENCODE_ARTIFACT_ALIASES.get(version, version)
+    supports_musl = _version_tuple(artifact_version) >= (1, 0, 0)
     return f"""\
 set -eu
 {shell_assignment("VERSION", version)}
+{shell_assignment("ARTIFACT_VERSION", artifact_version)}
+{shell_assignment("SUPPORTS_MUSL", "1" if supports_musl else "0")}
 DIR={shlex.quote(OPENCODE_DIR)}
 BIN={shlex.quote(OPENCODE_BIN)}
 
 current="$($BIN --version 2>/dev/null || true)"
-if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ]; }}; then
+if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ] || [ "$current" = "$ARTIFACT_VERSION" ] || [ "$current" = "v$ARTIFACT_VERSION" ]; }}; then
     exit 0
 fi
 
@@ -51,29 +67,44 @@ if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
     fi
 fi
 
-case "$(uname -m)" in
-    aarch64|arm64) stem=opencode-linux-arm64 ;;
-    x86_64|amd64) stem=opencode-linux-x64-baseline ;;
-    *) echo "unsupported OpenCode architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-# OpenCode publishes dynamically linked glibc and musl builds. Selecting the
-# wrong loader looks like a missing binary even when the archive extracted.
-libc_suffix=
+musl=0
 for loader in /lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1; do
     if [ -e "$loader" ]; then
-        libc_suffix=-musl
+        musl=1
         break
     fi
 done
-asset="$stem$libc_suffix.tar.gz"
+if [ "$musl" = 1 ] && [ "$SUPPORTS_MUSL" = 0 ]; then
+    echo "OpenCode $VERSION has no official musl artifact" >&2
+    exit 1
+fi
+
+case "$(uname -m)" in
+    aarch64|arm64)
+        package=opencode-linux-arm64
+        [ "$musl" = 0 ] || package="$package-musl"
+        ;;
+    x86_64|amd64)
+        if [ "$ARTIFACT_VERSION" = "0.1.195" ]; then
+            package=opencode-linux-x64
+        else
+            package=opencode-linux-x64-baseline
+        fi
+        [ "$musl" = 0 ] || package="$package-musl"
+        ;;
+    *) echo "unsupported OpenCode architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 
 mkdir -p "$DIR/bin"
-archive="$DIR/$asset.tmp"
-trap 'rm -f "$archive"' EXIT
-curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v$VERSION/$asset" -o "$archive"
+archive="$DIR/$package.tgz.tmp"
+unpack="$DIR/unpack"
+trap 'rm -rf "$archive" "$unpack"' EXIT
+curl -fsSL "https://registry.npmjs.org/$package/-/$package-$ARTIFACT_VERSION.tgz" -o "$archive"
 rm -f "$BIN"
-tar -xzf "$archive" -C "$DIR/bin"
+rm -rf "$unpack"
+mkdir -p "$unpack"
+tar -xzf "$archive" -C "$unpack"
+mv "$unpack/package/bin/opencode" "$BIN"
 chmod 755 "$BIN"
 """
 
@@ -123,26 +154,45 @@ class OpenCodeHarness(Harness[OpenCodeHarnessConfig]):
         config: dict = {
             "$schema": "https://opencode.ai/config.json",
             "autoupdate": False,
-            "share": "disabled",
-            "enabled_providers": [INTERCEPT_PROVIDER],
             "model": f"{INTERCEPT_PROVIDER}/{INTERCEPT_MODEL}",
-            # Prevent auxiliary work from silently selecting a catalog model.
-            "small_model": f"{INTERCEPT_PROVIDER}/{INTERCEPT_MODEL}",
             "provider": {
                 INTERCEPT_PROVIDER: {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "Verifiers interception",
                     "options": {
                         "baseURL": endpoint,
-                        "apiKey": f"{{env:{INTERCEPT_KEY_VAR}}}",
+                        # Config-variable expansion did not exist in v0.1.x.
+                        "apiKey": (
+                            secret
+                            if _version_tuple(self.config.version) < (0, 2, 0)
+                            else f"{{env:{INTERCEPT_KEY_VAR}}}"
+                        ),
                         "timeout": self.config.provider_timeout_ms,
                     },
                     "models": {INTERCEPT_MODEL: model},
                 }
             },
-            "permission": {"*": "allow"},
         }
-        if self.config.disabled_tools:
+
+        version = _version_tuple(self.config.version)
+        if version < (0, 3, 0):
+            config["autoshare"] = False
+        else:
+            config["share"] = "disabled"
+            # Prevent auxiliary work from silently selecting a catalog model.
+            config["small_model"] = f"{INTERCEPT_PROVIDER}/{INTERCEPT_MODEL}"
+            config["permission"] = (
+                {"*": "allow"}
+                if version >= (1, 0, 0)
+                else {
+                    "edit": "allow",
+                    "bash": "allow",
+                    **({"webfetch": "allow"} if version >= (0, 5, 0) else {}),
+                }
+            )
+        if version >= (1, 0, 0):
+            config["enabled_providers"] = [INTERCEPT_PROVIDER]
+        if self.config.disabled_tools and version >= (0, 3, 0):
             config["tools"] = {tool: False for tool in self.config.disabled_tools}
         if mcp_urls:
             config["mcp"] = {
@@ -151,12 +201,16 @@ class OpenCodeHarness(Harness[OpenCodeHarnessConfig]):
             }
 
         state_dir = f"/tmp/vf-opencode-state-{trace.id}"
+        config_path = f"{state_dir}/xdg-config/opencode/config.json"
+        await runtime.write(config_path, json.dumps(config).encode())
         env = {
             **self.config.resolved_env,
             INTERCEPT_KEY_VAR: secret,
             "NO_COLOR": "1",
-            "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-            "OPENCODE_CONFIG_DIR": f"{state_dir}/config",
+            # OPENCODE_CONFIG is supported by v0.3+; v0.1.x reads this same
+            # path as its XDG global config.
+            "OPENCODE_CONFIG": config_path,
+            "OPENCODE_CONFIG_DIR": f"{state_dir}/xdg-config/opencode",
             "XDG_CACHE_HOME": f"{state_dir}/cache",
             "XDG_CONFIG_HOME": f"{state_dir}/xdg-config",
             "XDG_DATA_HOME": f"{state_dir}/data",
@@ -167,13 +221,6 @@ class OpenCodeHarness(Harness[OpenCodeHarnessConfig]):
             "run",
             "--model",
             f"{INTERCEPT_PROVIDER}/{INTERCEPT_MODEL}",
-            "--agent",
-            "build",
-            "--auto",
-            "--title",
-            "Verifiers rollout",
-            "--format",
-            "json",
             "--",
             prompt,
         ]

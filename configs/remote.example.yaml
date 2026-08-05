@@ -8,7 +8,7 @@ ops:
         - id: omp_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 1
-      container_cpus: 10
+      container_cpus: 8
       container_memory_gb: 18
       remote:
         host: terminal-bench
@@ -17,4 +17,4 @@ ops:
 
 execution:
   config:
-    max_concurrent: 6
+    max_concurrent: 8

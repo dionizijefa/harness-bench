@@ -11,7 +11,7 @@ dependencies = [
     # them directly lets uv admit only those previews instead of all prereleases.
     "prime-pydantic-config[toml]>=0.3.0.dev86",
     "renderers>=0.1.8.dev40",
-    "verifiers[harbor]==0.2.0",
+    "verifiers[harbor]==0.2.1",
 ]
 
 [dependency-groups]

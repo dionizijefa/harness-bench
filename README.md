@@ -24,7 +24,7 @@ Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the L
 ops:
   plan_rollouts:
     config:
-      models: [deepseek/deepseek-v4-flash-latest]
+      models: [~deepseek/deepseek-v4-flash-latest]
       harnesses:
         - id: codex
         - id: opencode
@@ -32,23 +32,25 @@ ops:
         - id: omp_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 5
-      container_cpus: 10
+      container_cpus: 8
       container_memory_gb: 18
 
 execution:
   config:
-    max_concurrent: 6
+    max_concurrent: 8
 ```
 
 The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is
-the per-run process limit. The UI launcher currently provides six global
+the per-run process limit. The UI launcher currently provides eight global
 rollout slots. On the 64-thread / 125 GiB worker, Docker rollouts default to a
-hard limit of 10 CPUs and 18 GiB each. At six fully occupied slots this caps
-the benchmark workload at 60 CPU threads and 108 GiB, preserving host
-headroom. Override `container_cpus` or `container_memory_gb` in the Launchpad
-when the collected measurements justify a more aggressive profile. The
-ignored `.env` can override the global slot count with
-`HARNESS_BLOAT_ROLLOUT_SLOTS`; restart the launcher after changing it.
+hard limit of 8 CPUs and 18 GiB each, capping the aggregate CPU quota at 64
+threads. Docker memory limits are ceilings rather than reservations, so eight
+rollouts can nominally exceed host RAM if they all approach 18 GiB at once;
+keep monitoring the recorded peak-memory and OOM fields when increasing
+parallelism. Override `container_cpus` or `container_memory_gb` in the
+Launchpad when measurements justify a different profile. The ignored `.env`
+can override the global slot count with `HARNESS_BLOAT_ROLLOUT_SLOTS`; restart
+the launcher after changing it.
 
 Every run is automatically labeled in Dagster from its actual configuration:
 `harness_bloat/run_type=test` when `dry_run: true`, and
@@ -109,9 +111,10 @@ setup command can be rerun to resync after local code or lockfile changes.
 OpenRouter key, SSH host, username, key paths, and remote filesystem paths must
 stay in those private files or in `~/.ssh/config`, never in committed config.
 
-For local runs, let Dagster expand every task in the dataset with `task_ids: []`.
-To verify the graph without Docker or model calls, set `dry_run: true` and
-provide at least one task ID.
+For local runs, let Dagster expand every runnable task in the dataset with
+`task_ids: []`. Tasks that require image input are always excluded from both
+discovered and explicit task lists. To verify the graph without Docker or model
+calls, set `dry_run: true` and provide at least one runnable task ID.
 
 Headless execution uses the same run config:
 

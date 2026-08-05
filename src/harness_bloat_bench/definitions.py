@@ -34,6 +34,25 @@ REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 RUN_TYPE_TAG = "harness_bloat/run_type"
 DRY_RUN_TAG = "harness_bloat/dry_run"
 
+# Terminal-Bench tasks that require sending images to the model. Keep these out of
+# every rollout matrix because the benchmark's default text-only models cannot run
+# them through OpenRouter.
+IMAGE_INPUT_TASK_IDS = frozenset(
+    {
+        "build-pov-ray",
+        "chess-best-move",
+        "code-from-image",
+        "extract-moves-from-video",
+        "gcode-to-text",
+        "install-windows-3.11",
+        "make-doom-for-mips",
+        "path-tracing",
+        "raman-fitting",
+        "sam-cell-seg",
+        "video-processing",
+    }
+)
+
 
 class HarnessSpec(dg.Config):
     id: HarnessId = "codex"
@@ -67,7 +86,7 @@ def _remote_dict(remote: SSHExecutionConfig | dict | None) -> dict | None:
 
 
 class MatrixConfig(dg.Config):
-    models: list[str] = ["deepseek/deepseek-v4-flash-latest"]
+    models: list[str] = ["~deepseek/deepseek-v4-flash-latest"]
     # Empty means the default Codex harness. Dagster requires nested-config list
     # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
     harnesses: list[HarnessSpec] = []
@@ -78,7 +97,7 @@ class MatrixConfig(dg.Config):
     num_rollouts: int = 1
     dataset: str = "terminal-bench/terminal-bench-2-1"
     runtime: Literal["docker", "prime"] = "docker"
-    container_cpus: float | None = 10.0
+    container_cpus: float | None = 8.0
     container_memory_gb: float | None = 18.0
     base_url: str = "https://openrouter.ai/api/v1"
     api_key_var: str = "OPENROUTER_API_KEY"
@@ -125,23 +144,34 @@ def _task_ids(config: MatrixConfig) -> list[str]:
     requested = list(
         dict.fromkeys(task_id.rsplit("/", 1)[-1] for task_id in config.task_ids)
     )
+    runnable_requested = [
+        task_id for task_id in requested if task_id not in IMAGE_INPUT_TASK_IDS
+    ]
     if config.remote is not None:
         if not requested:
             raise dg.Failure(
                 "remote execution requires explicit task_ids; task discovery runs "
                 "on the local Dagster host"
             )
-        return requested
+        return runnable_requested
     if config.dry_run and requested:
-        return requested
+        return runnable_requested
+    # An explicit list containing only excluded tasks must stay empty rather than
+    # being interpreted by Harbor as a request to discover the entire dataset.
+    if requested and not runnable_requested:
+        return []
     taskset = HarborTaskset(
         HarborConfig(
             id="harbor",
             dataset=config.dataset,
-            tasks=requested or None,
+            tasks=runnable_requested or None,
         )
     )
-    return [Path(task.data.task_dir).name for task in taskset.load()]
+    return [
+        task_id
+        for task in taskset.load()
+        if (task_id := Path(task.data.task_dir).name) not in IMAGE_INPUT_TASK_IDS
+    ]
 
 
 @dg.op(out=dg.DynamicOut(dict))
@@ -300,11 +330,11 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
 
 def _trace_usage_fields(trace) -> dict:
     usage = trace.usage
-    model_nodes = [node for node in trace.nodes if node.sampled]
-    usage_count = sum(node.usage is not None for node in model_nodes)
+    model_calls = trace.calls
+    usage_count = sum(call.usage is not None for call in model_calls)
     usage_source = (
         "provider"
-        if usage is not None and usage_count == len(model_nodes)
+        if usage is not None and usage_count == len(model_calls)
         else "provider_partial"
         if usage is not None
         else "trace_fallback"
@@ -315,7 +345,7 @@ def _trace_usage_fields(trace) -> dict:
         "output_tokens": usage.completion_tokens if usage else trace.num_output_tokens,
         "total_tokens": usage.total_tokens if usage else trace.num_total_tokens,
         "reasoning_tokens": usage.reasoning_tokens if usage else None,
-        "model_call_count": len(model_nodes),
+        "model_call_count": len(model_calls),
         "usage_source": usage_source,
         "cost_usd": usage.cost if usage else None,
     }
@@ -736,7 +766,13 @@ def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
     return str(database_path)
 
 
-@dg.job(executor_def=dg.multiprocess_executor)
+rollout_executor = dg.multiprocess_executor.configured(
+    lambda config: {"max_concurrent": config["max_concurrent"]},
+    config_schema={"max_concurrent": dg.Field(int, default_value=8)},
+)
+
+
+@dg.job(executor_def=rollout_executor)
 def terminal_bench_rollouts() -> None:
     write_results(plan_rollouts().map(run_rollout).collect())
 

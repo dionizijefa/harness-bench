@@ -7,8 +7,10 @@ import dagster as dg
 import pytest
 from verifiers.v1.types import Usage
 
+import harness_bloat_bench.definitions as definitions
 from harness_bloat_bench.definitions import (
     DRY_RUN_TAG,
+    IMAGE_INPUT_TASK_IDS,
     RUN_TYPE_TAG,
     MatrixConfig,
     SSHExecutionConfig,
@@ -75,9 +77,16 @@ def test_real_runs_get_real_classification_tags() -> None:
     }
 
 
+def test_default_resource_profile_uses_eight_cpus_per_rollout() -> None:
+    config = MatrixConfig()
+
+    assert config.container_cpus == 8.0
+    assert config.container_memory_gb == 18.0
+
+
 def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
     config = MatrixConfig(
-        task_ids=["terminal-bench/task-a"],
+        task_ids=["terminal-bench/task-a", "terminal-bench/code-from-image"],
         remote=SSHExecutionConfig(
             host="terminal-bench",
             project_dir="/srv/harness-bloat-bench",
@@ -107,6 +116,49 @@ def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
         "ssh_options": [],
         "copy_artifacts": True,
     }
+    assert validated["execution"]["multiprocess"]["max_concurrent"] == 8
+
+
+def test_image_input_tasks_are_excluded_from_explicit_task_lists() -> None:
+    config = MatrixConfig(
+        task_ids=[
+            "terminal-bench/code-from-image",
+            "crack-7z-hash",
+            "video-processing",
+        ],
+        dry_run=True,
+        remote=None,
+    )
+
+    assert _task_ids(config) == ["crack-7z-hash"]
+
+
+def test_all_known_image_input_tasks_are_excluded() -> None:
+    config = MatrixConfig(
+        task_ids=sorted(IMAGE_INPUT_TASK_IDS),
+        dry_run=True,
+        remote=None,
+    )
+
+    assert _task_ids(config) == []
+
+
+def test_image_input_tasks_are_excluded_from_dataset_discovery(monkeypatch) -> None:
+    class FakeHarborTaskset:
+        def __init__(self, _config) -> None:
+            pass
+
+        def load(self) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/code-from-image")),
+                SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/task-a")),
+                SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/video-processing")),
+            ]
+
+    monkeypatch.setattr(definitions, "HarborTaskset", FakeHarborTaskset)
+    config = MatrixConfig(task_ids=[], remote=None)
+
+    assert _task_ids(config) == ["task-a"]
 
 
 def test_private_remote_config_loader(monkeypatch, tmp_path: Path) -> None:
@@ -140,10 +192,9 @@ def test_provider_usage_fields_include_cost_reasoning_and_calls() -> None:
     )
     trace = SimpleNamespace(
         usage=usage,
-        nodes=[
-            SimpleNamespace(sampled=False, usage=None),
-            SimpleNamespace(sampled=True, usage=object()),
-            SimpleNamespace(sampled=True, usage=object()),
+        calls=[
+            SimpleNamespace(usage=object()),
+            SimpleNamespace(usage=object()),
         ],
         num_input_tokens=0,
         num_output_tokens=0,
@@ -199,7 +250,7 @@ def test_hard_failure_is_persisted_immediately(tmp_path: Path) -> None:
 def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     config = _eval_config(
         {
-            "model": "deepseek/deepseek-v4-flash-latest",
+            "model": "~deepseek/deepseek-v4-flash-latest",
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_var": "OPENROUTER_API_KEY",
             "dataset": "terminal-bench/terminal-bench-2-1",
@@ -257,7 +308,7 @@ def test_eval_config_resolves_local_harness_plugins(
 ) -> None:
     config = _eval_config(
         {
-            "model": "deepseek/deepseek-v4-flash-latest",
+            "model": "~deepseek/deepseek-v4-flash-latest",
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_var": "OPENROUTER_API_KEY",
             "dataset": "terminal-bench/terminal-bench-2-1",

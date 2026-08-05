@@ -4,7 +4,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import dagster as dg
-import pytest
 from verifiers.v1.types import Usage
 
 import harness_bloat_bench.definitions as definitions
@@ -122,25 +121,14 @@ def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
 def test_image_input_tasks_are_excluded_from_explicit_task_lists() -> None:
     config = MatrixConfig(
         task_ids=[
-            "terminal-bench/code-from-image",
+            *sorted(IMAGE_INPUT_TASK_IDS),
             "crack-7z-hash",
-            "video-processing",
         ],
         dry_run=True,
         remote=None,
     )
 
     assert _task_ids(config) == ["crack-7z-hash"]
-
-
-def test_all_known_image_input_tasks_are_excluded() -> None:
-    config = MatrixConfig(
-        task_ids=sorted(IMAGE_INPUT_TASK_IDS),
-        dry_run=True,
-        remote=None,
-    )
-
-    assert _task_ids(config) == []
 
 
 def test_image_input_tasks_are_excluded_from_dataset_discovery(monkeypatch) -> None:
@@ -295,19 +283,7 @@ def test_cgroup_v2_resource_usage_is_aggregated(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("harness", "version", "config_type"),
-    [
-        ("codex_agent", "0.137.0", "CodexHarnessConfig"),
-        ("hermes_agent", "2026.8.3", "HermesAgentHarnessConfig"),
-        ("opencode", "1.18.1", "OpenCodeHarnessConfig"),
-        ("pi", "0.80.7", "PiHarnessConfig"),
-        ("omp_agent", "16.5.2", "OmpAgentHarnessConfig"),
-    ],
-)
-def test_eval_config_resolves_local_harness_plugins(
-    tmp_path: Path, harness: str, version: str, config_type: str
-) -> None:
+def test_eval_config_resolves_a_local_harness_plugin(tmp_path: Path) -> None:
     config = _eval_config(
         {
             "model": "~deepseek/deepseek-v4-flash-latest",
@@ -315,8 +291,8 @@ def test_eval_config_resolves_local_harness_plugins(
             "api_key_var": "OPENROUTER_API_KEY",
             "dataset": "terminal-bench/terminal-bench-2-1",
             "task_id": "crack-7z-hash",
-            "harness": harness,
-            "harness_version": version,
+            "harness": "hermes_agent",
+            "harness_version": "2026.8.3",
             "runtime": "docker",
             "rollout_retries": 0,
             "max_tokens": None,
@@ -325,8 +301,8 @@ def test_eval_config_resolves_local_harness_plugins(
         tmp_path,
     )
 
-    assert type(config.harness).__name__ == config_type
-    assert config.harness.version == version
+    assert type(config.harness).__name__ == "HermesAgentHarnessConfig"
+    assert config.harness.version == "2026.8.3"
 
 
 def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:

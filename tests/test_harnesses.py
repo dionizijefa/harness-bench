@@ -136,7 +136,6 @@ def test_opencode_launch_uses_isolated_config() -> None:
         "run",
         "--model",
         "verifiers/model",
-        "--",
         "Be precise\n\nFix the tests",
     ]
     assert config["provider"]["verifiers"]["options"]["baseURL"].endswith("/v1")

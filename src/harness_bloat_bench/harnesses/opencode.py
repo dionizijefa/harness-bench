@@ -221,7 +221,6 @@ class OpenCodeHarness(Harness[OpenCodeHarnessConfig]):
             "run",
             "--model",
             f"{INTERCEPT_PROVIDER}/{INTERCEPT_MODEL}",
-            "--",
             prompt,
         ]
         return await runtime.run_program(argv, env)

@@ -192,3 +192,28 @@ SELECT
 FROM rollout_results
 ORDER BY timestamp, harness, task_id, rollout;
 ```
+
+### Plot OpenCode history
+
+Generate the task outcome matrix, per-task token trends, version-level token
+variance, mean token/cost history, and successful-task cost/budget plots from
+the cross-run database:
+
+```sh
+uv run python scripts/plot_opencode_results.py
+```
+
+The command writes PNG plots plus `all_version_successful_spend.csv`,
+`version_variance.csv`, `mean_tokens_and_cost_by_version.csv`, and `summary.json`
+beneath `outputs/plots/opencode/`.
+A task counts as successful in all versions only when it is present in every
+selected version and every recorded rollout passed. Repeated rollouts are
+represented by their median usage. The budget plot compares output tokens with
+the cumulative configured generation allowance (`model_call_count ×` the
+per-call harness `max_tokens`); total tokens also include input and cached input.
+Version-variance comparisons use only tasks present in every selected version,
+so missing task/version pairs cannot skew the historical comparison.
+
+Use `--model` or `--dataset` when the database contains more than one value for
+the selected harness, and `--output-dir` to place the generated artifacts
+elsewhere.

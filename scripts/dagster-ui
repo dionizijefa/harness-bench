@@ -20,5 +20,19 @@ if [ ! -f "$DAGSTER_HOME/dagster.yaml" ]; then
     printf 'telemetry:\n  enabled: false\n' > "$DAGSTER_HOME/dagster.yaml"
 fi
 
+port_supplied=false
+for arg in "$@"; do
+    case "$arg" in
+        --port | --port=*)
+            port_supplied=true
+            break
+            ;;
+    esac
+done
+
+if [ "$port_supplied" = false ]; then
+    set -- --port "${DAGSTER_UI_PORT:-3210}" "$@"
+fi
+
 uv run dagster instance concurrency set rollouts "${HARNESS_BLOAT_ROLLOUT_SLOTS:-8}"
 exec uv run dagster dev -m harness_bloat_bench.definitions "$@"

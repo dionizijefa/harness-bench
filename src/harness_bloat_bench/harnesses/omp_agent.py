@@ -31,6 +31,14 @@ ThinkingLevel = Literal[
 ]
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    normalized = release_version(version)
+    try:
+        return tuple(int(part) for part in normalized.split("."))
+    except ValueError as error:
+        raise ValueError(f"OMP version must be numeric: {version}") from error
+
+
 def _install_script(version: str) -> str:
     version = release_version(version)
     return f"""\
@@ -129,12 +137,13 @@ class OmpAgentHarness(Harness[OmpAgentHarnessConfig]):
             OMP_BIN,
             "--no-session",
             "--no-title",
-            "--auto-approve",
             "--provider",
             INTERCEPT_PROVIDER,
             "--model",
             INTERCEPT_MODEL,
         ]
+        if _version_tuple(self.config.version) >= (15, 12, 4):
+            argv.append("--auto-approve")
         if self.config.thinking is not None:
             argv += ["--thinking", self.config.thinking]
         if system_prompt:

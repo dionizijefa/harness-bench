@@ -26,18 +26,22 @@ from harness_bloat_bench.resource_monitor import (
 HarnessId = Literal[
     "codex",
     "codex_agent",
+    "claude_code_agent",
     "hermes_agent",
     "opencode",
     "pi",
     "omp_agent",
+    "prime_agent",
 ]
 DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "codex": "0.137.0",
     "codex_agent": "0.137.0",
-    "hermes_agent": "2026.8.3",
+    "claude_code_agent": "2.1.226",
+    "hermes_agent": "0.20.0",
     "opencode": "1.18.1",
     "pi": "0.80.7",
     "omp_agent": "16.5.2",
+    "prime_agent": "0.7.1",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 RUN_TYPE_TAG = "harness_bloat/run_type"

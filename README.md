@@ -14,9 +14,19 @@ cp .env.example .env
 ```
 
 The launcher creates the local `.dagster` directory, configures the global
-`rollouts` concurrency limit, and starts the UI at http://localhost:3000.
-Additional `dagster dev` options are passed through, for example
-`./scripts/dagster-ui --port 3001`.
+`rollouts` concurrency limit, and starts the UI at http://localhost:3210.
+Set `DAGSTER_UI_PORT` or pass an explicit `--port` to use another port.
+Additional `dagster dev` options are passed through.
+
+On macOS, install a **Dagster UI** launcher in `~/Applications` and pin it to
+the Dock with:
+
+```sh
+./scripts/install-dagster-ui-app
+```
+
+Clicking the Dock icon runs `scripts/dagster-ui` in Terminal on port 3210 and
+opens the UI in the default browser once it is ready.
 
 Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the Launchpad:
 
@@ -27,10 +37,12 @@ ops:
       models: [~deepseek/deepseek-v4-flash-latest]
       harnesses:
         - id: codex_agent
+        - id: claude_code_agent
         - id: hermes_agent
         - id: opencode
         - id: pi
         - id: omp_agent
+        - id: prime_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 5
       container_cpus: 8
@@ -59,14 +71,33 @@ Every run is automatically labeled in Dagster from its actual configuration:
 be selected in the Runs page tag filter. The companion
 `harness_bloat/dry_run=true|false` tag is also attached for explicit filtering.
 
-`harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex Agent `0.137.0`, Hermes Agent `2026.8.3`, OpenCode `1.18.1`, Pi `0.80.7`, and OMP `16.5.2`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. `codex` remains an alias-compatible legacy ID, and the old `harness_versions` list remains accepted for Codex-only configs.
+`harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex Agent `0.137.0`, Claude Code `2.1.226`, Hermes Agent `0.20.0`, OpenCode `1.18.1`, Pi `0.80.7`, OMP `16.5.2`, and PrimeAgent `0.7.1`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. `codex` remains an alias-compatible legacy ID, and the old `harness_versions` list remains accepted for Codex-only configs.
 
 `configs/opencode-versions.yaml` is a ready-to-run matrix spanning the selected
 OpenCode `0.1.x` through `1.18.x` releases. OpenCode `0.1.196` has no published
 binary; its upstream tag points at the same commit as `0.1.195`, so the adapter
 uses the official `0.1.195` artifact for that one matrix label.
 
-The adapters install the official Linux releases inside each rollout sandbox and route their OpenAI-compatible calls through Verifiers interception. Codex Agent uses Verifiers' stock Codex CLI adapter. Hermes Agent runs its headless chat surface with isolated state, coding tools, task system prompts, and remote task MCP servers. OpenCode and OMP retain their stock coding-agent surfaces and also support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. See the upstream [Codex CLI](https://github.com/openai/codex), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), and [OMP repository](https://github.com/can1357/oh-my-pi) for the underlying behavior.
+`configs/hermes-agent-versions.yaml` is the corresponding Hermes Agent history
+matrix for the selected `0.2.0` through `0.20.0` releases. Hermes uses calendar
+Git tags for these product versions; the adapter resolves each matrix label to
+its exact upstream tag and selects the compatible installer and CLI surface.
+
+`configs/codex-agent-versions.yaml` and `configs/omp-agent-versions.yaml` add
+ready-to-run history matrices for the selected Codex Agent `0.78.0` through
+`0.147.0` releases and OMP `11.3.0` through `17.2.10` releases. Their adapters
+select the CLI flags and configuration shapes supported by each pinned release.
+
+`configs/prime-agent-versions.yaml` covers the modern PrimeAgent lineage from
+`0.2.6` through `0.7.1`, and `configs/claude-code-versions.yaml` samples Claude
+Code's `2.1.97` through `2.1.226` release history. Claude Code sends Anthropic
+Messages requests to Verifiers interception while mapping its primary, alias,
+and subagent model settings to the selected matrix model (DeepSeek by default).
+Its local plugin ID is `claude_code_agent` because Verifiers reserves
+`claude_code` for its built-in adapter, mirroring this project's existing
+`codex_agent` naming.
+
+The adapters install the official Linux releases inside each rollout sandbox and route model calls through Verifiers interception. Codex Agent layers historical-version compatibility over Verifiers' stock Codex CLI adapter. Claude Code uses its stock headless coding surface and Anthropic Messages protocol, including remote task MCP servers. Hermes Agent runs its headless chat surface with isolated state, coding tools, task system prompts, and remote task MCP servers. OpenCode and OMP retain their stock coding-agent surfaces and also support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. PrimeAgent retains its stock IPython/RLM tool surface with an isolated custom model registry and shared prepared kernel runtime. See the upstream [Codex CLI](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), [OMP repository](https://github.com/can1357/oh-my-pi), and [PrimeAgent repository](https://github.com/PrimeIntellect-ai/prime-agent) for the underlying behavior.
 
 The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.
 

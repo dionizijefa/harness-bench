@@ -1,0 +1,22 @@
+ops:
+  plan_rollouts:
+    config:
+      harnesses:
+        - {id: claude_code_agent, version: 2.1.97}
+        - {id: claude_code_agent, version: 2.1.109}
+        - {id: claude_code_agent, version: 2.1.118}
+        - {id: claude_code_agent, version: 2.1.128}
+        - {id: claude_code_agent, version: 2.1.140}
+        - {id: claude_code_agent, version: 2.1.159}
+        - {id: claude_code_agent, version: 2.1.186}
+        - {id: claude_code_agent, version: 2.1.200}
+        - {id: claude_code_agent, version: 2.1.210}
+        - {id: claude_code_agent, version: 2.1.226}
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      container_cpus: 8
+      container_memory_gb: 18
+
+execution:
+  config:
+    max_concurrent: 8

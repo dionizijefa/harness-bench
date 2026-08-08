@@ -1,0 +1,22 @@
+ops:
+  plan_rollouts:
+    config:
+      harnesses:
+        - {id: codex_agent, version: 0.78.0}
+        - {id: codex_agent, version: 0.88.0}
+        - {id: codex_agent, version: 0.94.0}
+        - {id: codex_agent, version: 0.102.0}
+        - {id: codex_agent, version: 0.110.0}
+        - {id: codex_agent, version: 0.118.0}
+        - {id: codex_agent, version: 0.124.0}
+        - {id: codex_agent, version: 0.134.0}
+        - {id: codex_agent, version: 0.140.0}
+        - {id: codex_agent, version: 0.147.0}
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      container_cpus: 8
+      container_memory_gb: 18
+
+execution:
+  config:
+    max_concurrent: 8

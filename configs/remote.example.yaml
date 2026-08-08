@@ -3,10 +3,12 @@ ops:
     config:
       harnesses:
         - id: codex_agent
+        - id: claude_code_agent
         - id: hermes_agent
         - id: opencode
         - id: pi
         - id: omp_agent
+        - id: prime_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 1
       container_cpus: 8

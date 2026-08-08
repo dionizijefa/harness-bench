@@ -28,8 +28,10 @@ build-backend = "hatchling.build"
 packages = [
     "src/harness_bloat_bench",
     "src/codex_agent",
+    "src/claude_code_agent",
     "src/hermes_agent",
     "src/opencode",
     "src/pi",
     "src/omp_agent",
+    "src/prime_agent",
 ]

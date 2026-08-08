@@ -1,0 +1,68 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_dir="$repo_root/macos/dagster-ui-app"
+app_name="Dagster UI"
+applications_dir="$HOME/Applications"
+app_path="$applications_dir/$app_name.app"
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/dagster-ui-app.XXXXXX")
+build_app="$build_dir/$app_name.app"
+iconset="$build_dir/AppIcon.iconset"
+
+cleanup() {
+    rm -rf "$build_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p \
+    "$applications_dir" \
+    "$iconset" \
+    "$build_app/Contents/MacOS" \
+    "$build_app/Contents/Resources"
+
+escaped_repo_root=$(printf '%s' "$repo_root" | sed 's/[\\&|]/\\&/g')
+sed "s|__REPO_ROOT__|$escaped_repo_root|g" \
+    "$source_dir/run.command.in" > "$build_app/Contents/Resources/run.command"
+cp "$source_dir/Info.plist" "$build_app/Contents/Info.plist"
+cp "$source_dir/launcher" "$build_app/Contents/MacOS/launcher"
+chmod +x \
+    "$build_app/Contents/MacOS/launcher" \
+    "$build_app/Contents/Resources/run.command"
+
+make_icon() {
+    size=$1
+    filename=$2
+    /usr/bin/sips -z "$size" "$size" "$source_dir/icon-1024.png" \
+        --out "$iconset/$filename" >/dev/null
+}
+
+make_icon 16 icon_16x16.png
+make_icon 32 icon_16x16@2x.png
+make_icon 32 icon_32x32.png
+make_icon 64 icon_32x32@2x.png
+make_icon 128 icon_128x128.png
+make_icon 256 icon_128x128@2x.png
+make_icon 256 icon_256x256.png
+make_icon 512 icon_256x256@2x.png
+make_icon 512 icon_512x512.png
+make_icon 1024 icon_512x512@2x.png
+
+/usr/bin/iconutil -c icns "$iconset" -o "$build_dir/AppIcon.icns"
+cp "$build_dir/AppIcon.icns" "$build_app/Contents/Resources/AppIcon.icns"
+
+if [ -e "$app_path" ]; then
+    mv "$app_path" "$build_dir/previous.app"
+fi
+mv "$build_app" "$app_path"
+/usr/bin/codesign --force --deep --sign - "$app_path" >/dev/null
+
+dock_url="file://$(printf '%s' "$app_path" | sed 's/ /%20/g')/"
+if ! defaults read com.apple.dock persistent-apps 2>/dev/null | grep -F "$dock_url" >/dev/null; then
+    defaults write com.apple.dock persistent-apps -array-add \
+        "{\"tile-data\"={\"file-data\"={\"_CFURLString\"=\"$dock_url\";\"_CFURLStringType\"=15;};};\"tile-type\"=\"file-tile\";}"
+    killall Dock
+fi
+
+printf 'Installed %s and pinned it to the Dock.\n' "$app_path"

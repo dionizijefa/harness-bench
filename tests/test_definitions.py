@@ -292,7 +292,7 @@ def test_eval_config_resolves_a_local_harness_plugin(tmp_path: Path) -> None:
             "dataset": "terminal-bench/terminal-bench-2-1",
             "task_id": "crack-7z-hash",
             "harness": "hermes_agent",
-            "harness_version": "2026.8.3",
+            "harness_version": "0.20.0",
             "runtime": "docker",
             "rollout_retries": 0,
             "max_tokens": None,
@@ -302,7 +302,7 @@ def test_eval_config_resolves_a_local_harness_plugin(tmp_path: Path) -> None:
     )
 
     assert type(config.harness).__name__ == "HermesAgentHarnessConfig"
-    assert config.harness.version == "2026.8.3"
+    assert config.harness.version == "0.20.0"
 
 
 def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
@@ -314,10 +314,12 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
                         "models": ["model-a"],
                         "harnesses": [
                             {"id": "codex_agent"},
+                            {"id": "claude_code_agent"},
                             {"id": "hermes_agent"},
                             {"id": "opencode"},
                             {"id": "pi"},
                             {"id": "omp_agent"},
+                            {"id": "prime_agent"},
                         ],
                         "task_ids": ["task-a"],
                         "output_dir": str(tmp_path),
@@ -338,8 +340,10 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
         )
     assert harnesses == {
         ("codex_agent", "0.137.0"),
-        ("hermes_agent", "2026.8.3"),
+        ("claude_code_agent", "2.1.226"),
+        ("hermes_agent", "0.20.0"),
         ("opencode", "1.18.1"),
         ("pi", "0.80.7"),
         ("omp_agent", "16.5.2"),
+        ("prime_agent", "0.7.1"),
     }

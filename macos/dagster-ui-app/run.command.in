@@ -1,0 +1,4 @@
+#!/bin/zsh
+
+cd "__REPO_ROOT__" || exit 1
+exec ./scripts/dagster-ui --port 3210

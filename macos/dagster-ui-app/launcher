@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -u
+
+resources_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../Resources" && pwd)
+ui_url="http://localhost:3210"
+
+if /usr/bin/curl --fail --silent --max-time 1 "$ui_url" >/dev/null; then
+    /usr/bin/open "$ui_url"
+    exit 0
+fi
+
+/usr/bin/open -a Terminal "$resources_dir/run.command"
+
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+    /bin/sleep 0.5
+    if /usr/bin/curl --fail --silent --max-time 1 "$ui_url" >/dev/null; then
+        /usr/bin/open "$ui_url"
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+done
+
+exit 1

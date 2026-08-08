@@ -45,6 +45,7 @@ ops:
         - id: prime_agent
       task_ids: [adaptive-rejection-sampler]
       num_rollouts: 5
+      run_type: full
       container_cpus: 8
       container_memory_gb: 18
       rollout_timeout_seconds: 5400
@@ -71,11 +72,16 @@ This framework timeout covers the harness run, while setup and scoring remain
 separate stages. Override `rollout_timeout_seconds` for a run, or set it to
 `null` to disable the limit.
 
-Every run is automatically labeled in Dagster from its actual configuration:
-`harness_bloat/run_type=test` when `dry_run: true`, and
-`harness_bloat/run_type=real` otherwise. These tags appear on the run and can
-be selected in the Runs page tag filter. The companion
-`harness_bloat/dry_run=true|false` tag is also attached for explicit filtering.
+Every run is automatically tagged in Dagster from its actual configuration.
+Set `run_type: test` for a real canary or smoke rollout and `run_type: full` for
+a complete benchmark; full is the default, while `dry_run: true` always implies
+test. The Runs page can filter on `harness_bloat/run_type`,
+`harness_bloat/model`, `harness_bloat/harness`,
+`harness_bloat/harness_version`, and `harness_bloat/harness_matrix`. The matrix
+tag retains exact harness/version pairs, such as
+`codex_agent@0.140.0,codex_agent@0.147.0`. The companion
+`harness_bloat/dry_run=true|false` tag distinguishes a real test rollout from a
+config-only dry run.
 
 `harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex Agent `0.137.0`, Claude Code `2.1.226`, Hermes Agent `0.20.0`, OpenCode `1.18.1`, Pi `0.80.7`, OMP `16.5.2`, and PrimeAgent `0.7.1`. Pin a different release with, for example, `{id: pi, version: 0.80.6}`. `codex` remains an alias-compatible legacy ID, and the old `harness_versions` list remains accepted for Codex-only configs.
 

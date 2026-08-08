@@ -46,6 +46,10 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 RUN_TYPE_TAG = "harness_bloat/run_type"
 DRY_RUN_TAG = "harness_bloat/dry_run"
+MODEL_TAG = "harness_bloat/model"
+HARNESS_TAG = "harness_bloat/harness"
+HARNESS_VERSION_TAG = "harness_bloat/harness_version"
+HARNESS_MATRIX_TAG = "harness_bloat/harness_matrix"
 
 # Terminal-Bench tasks that require sending images to the model. Keep these out of
 # every rollout matrix because the benchmark's default text-only models cannot run
@@ -119,14 +123,26 @@ class MatrixConfig(dg.Config):
     rollout_timeout_seconds: float | None = 5_400.0
     rollout_retries: int = 0
     output_dir: str = "outputs"
+    run_type: Literal["test", "full"] = "full"
     dry_run: bool = False
     remote: SSHExecutionConfig | None = _configured_remote()
 
 
-def _classification_tags(dry_run: bool) -> dict[str, str]:
+def _classification_tags(
+    config: MatrixConfig, harness_specs: list[tuple[HarnessId, str]]
+) -> dict[str, str]:
+    models = list(dict.fromkeys(config.models))
+    harnesses = list(dict.fromkeys(harness for harness, _ in harness_specs))
+    versions = list(dict.fromkeys(version for _, version in harness_specs))
     return {
-        RUN_TYPE_TAG: "test" if dry_run else "real",
-        DRY_RUN_TAG: str(dry_run).lower(),
+        RUN_TYPE_TAG: "test" if config.dry_run else config.run_type,
+        DRY_RUN_TAG: str(config.dry_run).lower(),
+        MODEL_TAG: ",".join(models),
+        HARNESS_TAG: ",".join(harnesses),
+        HARNESS_VERSION_TAG: ",".join(versions),
+        HARNESS_MATRIX_TAG: ",".join(
+            f"{harness}@{version}" for harness, version in harness_specs
+        ),
     }
 
 
@@ -192,9 +208,15 @@ def _task_ids(config: MatrixConfig) -> list[str]:
 def plan_rollouts(
     context: dg.OpExecutionContext, config: MatrixConfig
 ) -> Iterator[dg.DynamicOutput[dict]]:
-    run_tags = _classification_tags(config.dry_run)
+    harness_specs = _harness_specs(config)
+    run_tags = _classification_tags(config, harness_specs)
     context.instance.add_run_tags(context.run_id, run_tags)
-    context.log.info("Classified Dagster run as %s", run_tags[RUN_TYPE_TAG])
+    context.log.info(
+        "Tagged Dagster run as %s (%s; %s)",
+        run_tags[RUN_TYPE_TAG],
+        run_tags[MODEL_TAG],
+        run_tags[HARNESS_MATRIX_TAG],
+    )
 
     if config.num_rollouts < 1:
         raise dg.Failure("num_rollouts must be at least 1")
@@ -211,7 +233,7 @@ def plan_rollouts(
 
     cases = product(
         config.models,
-        _harness_specs(config),
+        harness_specs,
         _task_ids(config),
         range(1, config.num_rollouts + 1),
     )

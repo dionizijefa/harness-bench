@@ -9,7 +9,11 @@ from verifiers.v1.types import Usage
 import harness_bloat_bench.definitions as definitions
 from harness_bloat_bench.definitions import (
     DRY_RUN_TAG,
+    HARNESS_MATRIX_TAG,
+    HARNESS_TAG,
+    HARNESS_VERSION_TAG,
     IMAGE_INPUT_TASK_IDS,
+    MODEL_TAG,
     RUN_TYPE_TAG,
     MatrixConfig,
     SSHExecutionConfig,
@@ -51,6 +55,10 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     assert run is not None
     assert run.tags[RUN_TYPE_TAG] == "test"
     assert run.tags[DRY_RUN_TAG] == "true"
+    assert run.tags[MODEL_TAG] == "model-a,model-b"
+    assert run.tags[HARNESS_TAG] == "codex"
+    assert run.tags[HARNESS_VERSION_TAG] == "0.137.0"
+    assert run.tags[HARNESS_MATRIX_TAG] == "codex@0.137.0"
     database_path = Path(result.output_for_node("write_results"))
     assert database_path == tmp_path / "results.sqlite"
     with sqlite3.connect(database_path) as connection:
@@ -69,11 +77,36 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     ]
 
 
-def test_real_runs_get_real_classification_tags() -> None:
-    assert _classification_tags(False) == {
-        RUN_TYPE_TAG: "real",
+def test_full_runs_get_matrix_classification_tags() -> None:
+    config = MatrixConfig(
+        models=["model-a"],
+        harnesses=[
+            {"id": "codex_agent", "version": "0.140.0"},
+            {"id": "codex_agent", "version": "0.147.0"},
+        ],
+        remote=None,
+    )
+
+    assert _classification_tags(
+        config,
+        [("codex_agent", "0.140.0"), ("codex_agent", "0.147.0")],
+    ) == {
+        RUN_TYPE_TAG: "full",
         DRY_RUN_TAG: "false",
+        MODEL_TAG: "model-a",
+        HARNESS_TAG: "codex_agent",
+        HARNESS_VERSION_TAG: "0.140.0,0.147.0",
+        HARNESS_MATRIX_TAG: "codex_agent@0.140.0,codex_agent@0.147.0",
     }
+
+
+def test_real_test_rollout_can_be_tagged_without_being_a_dry_run() -> None:
+    config = MatrixConfig(run_type="test", remote=None)
+
+    tags = _classification_tags(config, [("codex", "0.137.0")])
+
+    assert tags[RUN_TYPE_TAG] == "test"
+    assert tags[DRY_RUN_TAG] == "false"
 
 
 def test_default_resource_profile_uses_eight_cpus_per_rollout() -> None:

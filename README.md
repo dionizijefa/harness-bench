@@ -47,6 +47,7 @@ ops:
       num_rollouts: 5
       container_cpus: 8
       container_memory_gb: 18
+      rollout_timeout_seconds: 5400
 
 execution:
   config:
@@ -64,6 +65,11 @@ parallelism. Override `container_cpus` or `container_memory_gb` in the
 Launchpad when measurements justify a different profile. The ignored `.env`
 can override the global slot count with `HARNESS_BLOAT_ROLLOUT_SLOTS`; restart
 the launcher after changing it.
+
+Agent execution is capped at 5,400 seconds (90 minutes) per rollout by default.
+This framework timeout covers the harness run, while setup and scoring remain
+separate stages. Override `rollout_timeout_seconds` for a run, or set it to
+`null` to disable the limit.
 
 Every run is automatically labeled in Dagster from its actual configuration:
 `harness_bloat/run_type=test` when `dry_run: true`, and

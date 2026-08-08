@@ -81,6 +81,7 @@ def test_default_resource_profile_uses_eight_cpus_per_rollout() -> None:
 
     assert config.container_cpus == 8.0
     assert config.container_memory_gb == 18.0
+    assert config.rollout_timeout_seconds == 5_400.0
 
 
 def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
@@ -260,6 +261,7 @@ def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     assert config.harness.runtime.type == "docker"
     assert config.harness.runtime.cpu == 10.0
     assert config.harness.runtime.memory == 18.0
+    assert config.timeout.rollout == 5_400.0
 
 
 def test_cgroup_v2_resource_usage_is_aggregated(tmp_path: Path) -> None:

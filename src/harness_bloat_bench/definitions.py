@@ -116,6 +116,7 @@ class MatrixConfig(dg.Config):
     api_key_var: str = "OPENROUTER_API_KEY"
     max_tokens: int | None = None
     temperature: float | None = None
+    rollout_timeout_seconds: float | None = 5_400.0
     rollout_retries: int = 0
     output_dir: str = "outputs"
     dry_run: bool = False
@@ -197,6 +198,11 @@ def plan_rollouts(
 
     if config.num_rollouts < 1:
         raise dg.Failure("num_rollouts must be at least 1")
+    if (
+        config.rollout_timeout_seconds is not None
+        and config.rollout_timeout_seconds <= 0
+    ):
+        raise dg.Failure("rollout_timeout_seconds must be positive or null")
     if config.runtime == "docker":
         if config.container_cpus is not None and config.container_cpus <= 0:
             raise dg.Failure("container_cpus must be positive or null")
@@ -229,6 +235,7 @@ def plan_rollouts(
                 "api_key_var": config.api_key_var,
                 "max_tokens": config.max_tokens,
                 "temperature": config.temperature,
+                "rollout_timeout_seconds": config.rollout_timeout_seconds,
                 "rollout_retries": config.rollout_retries,
                 "output_dir": config.output_dir,
                 "dry_run": config.dry_run,
@@ -279,6 +286,9 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
             },
             "retries": {
                 "rollout": {"max_retries": spec["rollout_retries"]},
+            },
+            "timeout": {
+                "rollout": spec.get("rollout_timeout_seconds", 5_400.0),
             },
             "num_tasks": 1,
             "num_rollouts": 1,

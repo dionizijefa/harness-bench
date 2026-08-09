@@ -109,6 +109,19 @@ Its local plugin ID is `claude_code_agent` because Verifiers reserves
 `claude_code` for its built-in adapter, mirroring this project's existing
 `codex_agent` naming.
 
+Before launching a full version matrix, run the matching Harbor `hello-world`
+smoke check. Both commands use the same Docker limits, timeouts, pass criteria,
+OpenRouter endpoint, and default `~deepseek/deepseek-v4-flash-latest` model:
+
+```sh
+uv run python scripts/smoke_codex_versions.py 0.147.0
+uv run python scripts/smoke_claude_code_versions.py 2.1.226
+```
+
+Pass `--model` to override the model or list multiple versions to check them
+concurrently. The commands read `OPENROUTER_API_KEY` from the environment; use
+`--api-key-stdin` when invoking them through SSH without persisting the key.
+
 The adapters install the official Linux releases inside each rollout sandbox and route model calls through Verifiers interception. Codex Agent layers historical-version compatibility over Verifiers' stock Codex CLI adapter. Claude Code uses its stock headless coding surface and Anthropic Messages protocol, including remote task MCP servers. Hermes Agent runs its headless chat surface with isolated state, coding tools, task system prompts, and remote task MCP servers. OpenCode and OMP retain their stock coding-agent surfaces and also support task MCP servers. Pi uses its stock coding prompt with all seven documented built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`), medium thinking, project instructions, and no persisted session. PrimeAgent retains its stock IPython/RLM tool surface with an isolated custom model registry and shared prepared kernel runtime. See the upstream [Codex CLI](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenCode CLI](https://opencode.ai/docs/cli/), [Pi usage guide](https://pi.dev/docs/latest/usage), [OMP repository](https://github.com/can1357/oh-my-pi), and [PrimeAgent repository](https://github.com/PrimeIntellect-ai/prime-agent) for the underlying behavior.
 
 The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.

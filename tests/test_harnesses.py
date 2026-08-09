@@ -95,6 +95,11 @@ def trace(prompt: str = "Fix the tests", system_prompt: str = "Be precise"):
 def context():
     return SimpleNamespace(
         model="~deepseek/deepseek-v4-flash-latest",
+        client=SimpleNamespace(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="openrouter-secret",
+            headers={},
+        ),
         sampling=SimpleNamespace(reasoning_effort=None),
     )
 
@@ -264,13 +269,14 @@ def test_requested_claude_code_versions_use_pinned_official_installer(
 
 def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
     runtime = FakeRuntime()
+    ctx = context()
     harness = ClaudeCodeHarness(
         ClaudeCodeHarnessConfig(id="claude_code_agent", disabled_tools=["WebFetch"])
     )
 
     asyncio.run(
         harness.launch(
-            context(),
+            ctx,
             trace(),
             runtime,
             "http://127.0.0.1:9000/v1",
@@ -295,6 +301,7 @@ def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
         "url": "http://127.0.0.1:9001/mcp",
     }
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9000"
+    assert env["ANTHROPIC_API_KEY"] == ""
     assert env["ANTHROPIC_AUTH_TOKEN"] == "session-secret"
     assert env["ANTHROPIC_MODEL"] == model
     assert env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == model
@@ -302,6 +309,8 @@ def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == model
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == model
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == model
+    assert ctx.client.base_url == "https://openrouter.ai/api"
+    assert ctx.client.headers["Authorization"] == "Bearer openrouter-secret"
 
 
 PRIME_AGENT_HISTORY_VERSIONS = [

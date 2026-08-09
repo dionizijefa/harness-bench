@@ -2,10 +2,12 @@
 
 import logging
 import shlex
+from typing import cast
+from urllib.parse import urlparse
 
 import verifiers.v1.harnesses.claude_code.harness as stock_claude
 from pydantic import Field
-from verifiers.v1.clients import ModelContext
+from verifiers.v1.clients import EvalClient, ModelContext
 from verifiers.v1.harness import Harness
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
@@ -34,6 +36,19 @@ def _install_script(version: str) -> str:
         version=version,
         home=stock_claude.CLAUDE_HOME.format(version=version),
     )
+
+
+def _configure_anthropic_upstream(client: EvalClient) -> None:
+    """Adapt an OpenAI-style client root for the Anthropic Messages dialect."""
+    # EvalClient appends the dialect path (/v1/messages). Matrix endpoints normally
+    # include /v1 for OpenAI harnesses, so remove it before Claude makes a request.
+    client.base_url = client.base_url.removesuffix("/v1")
+    host = urlparse(client.base_url).hostname or ""
+    if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+        # OpenRouter's Anthropic Messages skin authenticates with Bearer. Keep the
+        # dialect's x-api-key too; both carry the same key and Claude-compatible
+        # providers that accept x-api-key continue to work unchanged.
+        client.headers["Authorization"] = f"Bearer {client.api_key}"
 
 
 class ClaudeCodeHarnessConfig(stock_claude.ClaudeCodeHarnessConfig):
@@ -75,6 +90,8 @@ class ClaudeCodeHarness(Harness[ClaudeCodeHarnessConfig]):
         if prompt is None:
             raise ValueError("Claude Code requires a task prompt")
 
+        _configure_anthropic_upstream(cast(EvalClient, ctx.client))
+
         state_dir = f"/tmp/vf-claude-code-state-{trace.id}"
         argv = [
             _claude_bin(self.config.version),
@@ -109,6 +126,9 @@ class ClaudeCodeHarness(Harness[ClaudeCodeHarnessConfig]):
         model = ctx.model
         env = {
             **self.config.resolved_env,
+            # AUTH_TOKEN makes Claude send Bearer auth to interception. Explicitly
+            # clear API_KEY so no cached Anthropic login mode can take precedence.
+            "ANTHROPIC_API_KEY": "",
             "ANTHROPIC_AUTH_TOKEN": secret,
             # Claude appends /v1/messages; interception's endpoint already ends in /v1.
             "ANTHROPIC_BASE_URL": endpoint.removesuffix("/v1"),

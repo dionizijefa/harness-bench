@@ -80,7 +80,7 @@ mv -f "$tmp" "$BIN"
 
 
 class OmpAgentHarnessConfig(HarnessConfig):
-    version: str = "16.5.2"
+    version: str = "17.2.10"
     """Oh My Pi release to install, pinned for reproducibility."""
 
     thinking: ThinkingLevel | None = "high"

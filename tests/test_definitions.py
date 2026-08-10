@@ -379,6 +379,6 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
         ("hermes_agent", "0.20.0"),
         ("opencode", "1.18.1"),
         ("pi", "0.80.7"),
-        ("omp_agent", "16.5.2"),
+        ("omp_agent", "17.2.10"),
         ("prime_agent", "0.7.1"),
     }

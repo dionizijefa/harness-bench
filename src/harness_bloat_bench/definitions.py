@@ -40,7 +40,7 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "hermes_agent": "0.20.0",
     "opencode": "1.18.1",
     "pi": "0.80.7",
-    "omp_agent": "16.5.2",
+    "omp_agent": "17.2.10",
     "prime_agent": "0.7.1",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="

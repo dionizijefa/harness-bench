@@ -545,12 +545,22 @@ def test_omp_launch_keeps_stock_agent_and_wires_mcp() -> None:
     assert argv[argv.index("--thinking") + 1] == "high"
     assert argv[-3:] == ["--print", "--", "Fix the tests"]
     assert "session-secret" not in argv
-    assert models["providers"]["verifiers"]["apiKey"] == "VF_INTERCEPT_KEY"
+    provider = models["providers"]["verifiers"]
+    assert provider["baseUrl"] == "http://127.0.0.1:9000/v1"
+    assert provider["api"] == "openai-completions"
+    assert provider["apiKey"] == "VF_INTERCEPT_KEY"
+    assert provider["models"][0]["id"] == "model"
+    assert provider["models"][0]["name"] == (
+        "~deepseek/deepseek-v4-flash-latest"
+    )
+    assert provider["models"][0]["contextWindow"] == 128_000
+    assert provider["models"][0]["maxTokens"] == 32_000
     assert mcp["mcpServers"]["task-tools"] == {
         "enabled": True,
         "type": "http",
         "url": "http://127.0.0.1:9001/mcp",
     }
+    assert env["VF_INTERCEPT_KEY"] == "session-secret"
     assert env["PI_CODING_AGENT_DIR"] == "/tmp/vf-omp-agent-trace-123"
 
 

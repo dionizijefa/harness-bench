@@ -7,7 +7,7 @@ from harness_bloat_bench.smoke_harness_versions import (
 )
 
 
-def test_codex_and_claude_code_share_the_hello_world_smoke_setup(
+def test_versioned_harnesses_share_the_hello_world_smoke_setup(
     tmp_path: Path,
 ) -> None:
     codex = eval_config("codex_agent", "0.147.0", DEFAULT_MODEL, tmp_path / "codex")
@@ -17,15 +17,26 @@ def test_codex_and_claude_code_share_the_hello_world_smoke_setup(
         DEFAULT_MODEL,
         tmp_path / "claude",
     )
+    omp = eval_config("omp_agent", "17.2.10", DEFAULT_MODEL, tmp_path / "omp")
 
-    assert codex.model == claude.model == "~deepseek/deepseek-v4-flash-latest"
-    assert codex.client.base_url == claude.client.base_url == OPENROUTER_BASE_URL
-    assert codex.client.api_key_var == claude.client.api_key_var == (
+    configs = [codex, claude, omp]
+    assert {config.model for config in configs} == {
+        "~deepseek/deepseek-v4-flash-latest"
+    }
+    assert {config.client.base_url for config in configs} == {OPENROUTER_BASE_URL}
+    assert {config.client.api_key_var for config in configs} == {
         "OPENROUTER_API_KEY"
+    }
+    assert all(
+        config.taskset.model_dump() == codex.taskset.model_dump()
+        for config in configs
     )
-    assert codex.taskset.model_dump() == claude.taskset.model_dump()
     assert codex.harness.id == "codex_agent"
     assert claude.harness.id == "claude_code_agent"
-    assert codex.harness.runtime.model_dump() == claude.harness.runtime.model_dump()
-    assert codex.timeout == claude.timeout
-    assert codex.retries == claude.retries
+    assert omp.harness.id == "omp_agent"
+    assert all(
+        config.harness.runtime.model_dump() == codex.harness.runtime.model_dump()
+        for config in configs
+    )
+    assert all(config.timeout == codex.timeout for config in configs)
+    assert all(config.retries == codex.retries for config in configs)

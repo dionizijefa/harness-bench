@@ -23,6 +23,8 @@ from harness_bloat_bench.definitions import (
     _hard_failure_row,
     _persist_rollout_row,
     _remote_dict,
+    _remote_wall_timeout_seconds,
+    _ssh_command,
     _task_ids,
     _trace_usage_fields,
     terminal_bench_rollouts,
@@ -47,7 +49,7 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
                     }
                 }
             }
-        }
+        },
     )
 
     assert result.success
@@ -148,8 +150,49 @@ def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
         "project_dir": "/srv/harness-bloat-bench",
         "ssh_options": [],
         "copy_artifacts": True,
+        "wall_timeout_seconds": None,
+        "timeout_grace_seconds": 1_800.0,
+        "artifact_copy_timeout_seconds": 900.0,
     }
     assert validated["execution"]["multiprocess"]["max_concurrent"] == 8
+
+
+def test_remote_ssh_has_keepalives_and_an_outer_deadline() -> None:
+    remote = {
+        "host": "terminal-bench",
+        "project_dir": "/srv/harness-bloat-bench",
+        "ssh_options": ["-o", "ServerAliveInterval=10"],
+        "timeout_grace_seconds": 1_800.0,
+    }
+    command = _ssh_command(remote, "true")
+
+    assert command[:4] == ["ssh", "-o", "ServerAliveInterval=10", "-o"]
+    assert "BatchMode=yes" in command
+    assert "ConnectTimeout=30" in command
+    assert "ServerAliveInterval=30" in command
+    assert "ServerAliveCountMax=3" in command
+    assert command[-3:] == ["--", "terminal-bench", "true"]
+    assert (
+        _remote_wall_timeout_seconds(
+            {
+                "remote": remote,
+                "rollout_timeout_seconds": 5_400.0,
+            }
+        )
+        == 7_200.0
+    )
+
+
+def test_explicit_remote_wall_timeout_overrides_derived_deadline() -> None:
+    assert (
+        _remote_wall_timeout_seconds(
+            {
+                "remote": {"wall_timeout_seconds": 600.0},
+                "rollout_timeout_seconds": 5_400.0,
+            }
+        )
+        == 600.0
+    )
 
 
 def test_image_input_tasks_are_excluded_from_explicit_task_lists() -> None:
@@ -172,9 +215,13 @@ def test_image_input_tasks_are_excluded_from_dataset_discovery(monkeypatch) -> N
 
         def load(self) -> list[SimpleNamespace]:
             return [
-                SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/code-from-image")),
+                SimpleNamespace(
+                    data=SimpleNamespace(task_dir="/tasks/code-from-image")
+                ),
                 SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/task-a")),
-                SimpleNamespace(data=SimpleNamespace(task_dir="/tasks/video-processing")),
+                SimpleNamespace(
+                    data=SimpleNamespace(task_dir="/tasks/video-processing")
+                ),
             ]
 
     monkeypatch.setattr(definitions, "HarborTaskset", FakeHarborTaskset)

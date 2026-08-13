@@ -1,0 +1,126 @@
+#!/usr/bin/env -S uv run python
+"""Recover finalized remote traces whose SSH result channel was lost."""
+
+import argparse
+import datetime as dt
+import json
+import os
+import pickle
+from pathlib import Path
+from types import SimpleNamespace
+
+from harness_bloat_bench.definitions import (
+    _copy_remote_artifacts,
+    _persist_rollout_row,
+)
+
+
+def _usage_fields(calls: list[dict]) -> dict:
+    usages = [call.get("usage") for call in calls]
+    present = [usage for usage in usages if usage]
+    input_tokens = sum(
+        usage.get("prompt_tokens", 0) + usage.get("cached_input_tokens", 0)
+        for usage in present
+    )
+    output_tokens = sum(usage.get("completion_tokens", 0) for usage in present)
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": sum(
+            usage.get("cached_input_tokens", 0) for usage in present
+        ),
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "reasoning_tokens": sum(usage.get("reasoning_tokens", 0) for usage in present),
+        "model_call_count": len(usages),
+        "usage_source": (
+            "provider" if len(present) == len(usages) else "provider_partial"
+        ),
+        "cost_usd": sum(usage.get("cost", 0.0) for usage in present),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Copy completed remote traces and restore their result rows."
+    )
+    parser.add_argument("run_id", help="Dagster run ID")
+    parser.add_argument(
+        "rollouts",
+        nargs="+",
+        type=int,
+        help="Numeric mapped rollout IDs, for example 363 377",
+    )
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parent.parent
+    os.chdir(repo_root)
+    dagster_home = Path(
+        os.environ.get("DAGSTER_HOME", repo_root / ".dagster" / "runtime")
+    )
+    for rollout in args.rollouts:
+        key = f"rollout_{rollout:06d}"
+        spec_path = (
+            dagster_home / "storage" / args.run_id / "plan_rollouts/result" / key
+        )
+        with spec_path.open("rb") as stream:
+            # This is trusted local Dagster storage created by this repository.
+            spec = pickle.load(stream)
+
+        remote = spec.get("remote")
+        if not remote:
+            parser.error(f"{key} is not an SSH rollout")
+        local_dir = Path(spec["output_dir"]) / args.run_id / key
+        remote_dir = str(Path(spec["output_dir"]) / args.run_id / key)
+        context = SimpleNamespace(
+            log=SimpleNamespace(info=lambda message, *values: print(message % values))
+        )
+        _copy_remote_artifacts(context, remote, remote_dir, local_dir)
+
+        trace_path = local_dir / "traces.jsonl"
+        traces = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        if len(traces) != 1 or not traces[0].get("is_completed"):
+            parser.error(f"{trace_path} does not contain one completed trace")
+        trace = traces[0]
+        reward = trace.get("rewards", {}).get("solved", 0.0)
+        timing = trace["timing"]
+        row = {
+            "dagster_run_id": args.run_id,
+            "rollout_key": key,
+            "model": spec["model"],
+            "harness": spec["harness"],
+            "harness_version": spec["harness_version"],
+            "dataset": spec["dataset"],
+            "task_id": spec["task_id"],
+            "rollout": spec["rollout"],
+            "container_cpu_limit": spec.get("container_cpus"),
+            "container_memory_limit_gb": spec.get("container_memory_gb"),
+            "output_dir": str(local_dir),
+            "remote_output_dir": remote_dir,
+            "timestamp": dt.datetime.fromtimestamp(timing["start"], dt.UTC).isoformat(),
+            "trace_id": trace["id"],
+            "status": "passed" if reward >= 1 else "failed",
+            "passed": reward >= 1,
+            "reward": reward,
+            "rewards": trace.get("rewards", {}),
+            "error": None,
+            "runtime_seconds": timing["scoring"]["end"] - timing["start"],
+            **_usage_fields(trace.get("calls", [])),
+            "resource_usage_source": None,
+            "cpu_seconds": None,
+            "peak_memory_bytes": None,
+            "io_read_bytes": None,
+            "io_write_bytes": None,
+            "peak_pids": None,
+            "oom_kill_count": None,
+            "recovery": {
+                "reason": "stale SSH transport after finalized remote trace",
+                "trace_stop_condition": trace.get("stop_condition"),
+                "recovered_at": dt.datetime.now(dt.UTC).isoformat(),
+            },
+        }
+        database = _persist_rollout_row(row)
+        print(f"Recovered {key}: {row['status']} reward={reward:g} -> {database}")
+
+
+if __name__ == "__main__":
+    main()

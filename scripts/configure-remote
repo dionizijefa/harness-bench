@@ -41,9 +41,7 @@ def main() -> None:
             text=True,
         ).strip()
         project_dir = f"{remote_home}/harness-bloat-bench"
-    if not project_dir.startswith("/") or any(
-        char.isspace() for char in project_dir
-    ):
+    if not project_dir.startswith("/") or any(char.isspace() for char in project_dir):
         parser.error("project_dir must be an absolute path without whitespace")
 
     remote_dir = shlex.quote(project_dir)
@@ -75,8 +73,7 @@ def main() -> None:
             "ssh",
             "--",
             args.host,
-            'export PATH="$HOME/.local/bin:$PATH"; '
-            f"cd {remote_dir} && uv sync",
+            f'export PATH="$HOME/.local/bin:$PATH"; cd {remote_dir} && uv sync',
         ]
     )
 
@@ -88,6 +85,9 @@ def main() -> None:
                 "project_dir": project_dir,
                 "ssh_options": [],
                 "copy_artifacts": True,
+                "wall_timeout_seconds": None,
+                "timeout_grace_seconds": 1_800.0,
+                "artifact_copy_timeout_seconds": 900.0,
             },
             indent=2,
         )

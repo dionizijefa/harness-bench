@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import selectors
 import shlex
 import sqlite3
 import subprocess
@@ -81,6 +82,9 @@ class SSHExecutionConfig(dg.Config):
     project_dir: str
     ssh_options: list[str] = []
     copy_artifacts: bool = True
+    wall_timeout_seconds: float | None = None
+    timeout_grace_seconds: float = 1_800.0
+    artifact_copy_timeout_seconds: float = 900.0
 
 
 def _configured_remote() -> dict | None:
@@ -90,7 +94,9 @@ def _configured_remote() -> dict | None:
     try:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"cannot load remote config {config_path}: {error}") from error
+        raise RuntimeError(
+            f"cannot load remote config {config_path}: {error}"
+        ) from error
     if not isinstance(config, dict):
         raise RuntimeError(f"remote config {config_path} must contain a JSON object")
     return config
@@ -225,6 +231,16 @@ def plan_rollouts(
         and config.rollout_timeout_seconds <= 0
     ):
         raise dg.Failure("rollout_timeout_seconds must be positive or null")
+    if config.remote is not None:
+        if (
+            config.remote.wall_timeout_seconds is not None
+            and config.remote.wall_timeout_seconds <= 0
+        ):
+            raise dg.Failure("remote.wall_timeout_seconds must be positive or null")
+        if config.remote.timeout_grace_seconds <= 0:
+            raise dg.Failure("remote.timeout_grace_seconds must be positive")
+        if config.remote.artifact_copy_timeout_seconds <= 0:
+            raise dg.Failure("remote.artifact_copy_timeout_seconds must be positive")
     if config.runtime == "docker":
         if config.container_cpus is not None and config.container_cpus <= 0:
             raise dg.Failure("container_cpus must be positive or null")
@@ -416,9 +432,7 @@ def _hard_failure_row(
             spec.get("container_cpus") if spec.get("runtime") == "docker" else None
         ),
         "container_memory_limit_gb": (
-            spec.get("container_memory_gb")
-            if spec.get("runtime") == "docker"
-            else None
+            spec.get("container_memory_gb") if spec.get("runtime") == "docker" else None
         ),
         "output_dir": str(output_dir),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -447,7 +461,77 @@ def _hard_failure_row(
 
 
 def _ssh_command(remote: dict, command: str) -> list[str]:
-    return ["ssh", *remote["ssh_options"], "--", remote["host"], command]
+    # User-provided command-line options come first because OpenSSH uses the
+    # first value it receives for an option. The defaults therefore remain
+    # overridable while protecting ordinary runs from half-open TCP sessions.
+    return [
+        "ssh",
+        *remote.get("ssh_options", []),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=30",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "--",
+        remote["host"],
+        command,
+    ]
+
+
+def _remote_wall_timeout_seconds(spec: dict) -> float | None:
+    remote = spec["remote"]
+    if remote.get("wall_timeout_seconds") is not None:
+        return float(remote["wall_timeout_seconds"])
+    rollout_timeout = spec.get("rollout_timeout_seconds")
+    if rollout_timeout is None:
+        return None
+    return float(rollout_timeout) + float(remote.get("timeout_grace_seconds", 1_800.0))
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _process_output_lines(
+    process: subprocess.Popen, timeout_seconds: float | None
+) -> Iterator[str]:
+    """Yield binary subprocess output without letting a silent pipe bypass a deadline."""
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
+    pending = b""
+    try:
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError
+            events = selector.select(1.0 if remaining is None else min(1.0, remaining))
+            if not events:
+                continue
+            chunk = os.read(process.stdout.fileno(), 65_536)
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                yield line.decode(errors="replace")
+        if pending:
+            yield pending.decode(errors="replace")
+    finally:
+        selector.close()
 
 
 def _copy_remote_artifacts(
@@ -458,23 +542,33 @@ def _copy_remote_artifacts(
 ) -> None:
     local_output_dir.mkdir(parents=True, exist_ok=True)
     context.log.info("Copying remote artifacts into %s", local_output_dir)
+    copy_timeout = float(remote.get("artifact_copy_timeout_seconds", 900.0))
     remote_command = (
         f"cd {shlex.quote(remote['project_dir'])} && "
-        f"tar -C {shlex.quote(remote_output_dir)} -cf - ."
+        "exec timeout --signal=TERM --kill-after=30s "
+        f"{copy_timeout}s tar -C {shlex.quote(remote_output_dir)} -cf - ."
     )
     ssh_process = subprocess.Popen(
         _ssh_command(remote, remote_command),
         stdout=subprocess.PIPE,
     )
     assert ssh_process.stdout is not None
-    tar_process = subprocess.run(
-        ["tar", "-xf", "-", "-C", str(local_output_dir)],
-        stdin=ssh_process.stdout,
-        capture_output=True,
-        text=False,
-    )
-    ssh_process.stdout.close()
-    ssh_return_code = ssh_process.wait()
+    try:
+        tar_process = subprocess.run(
+            ["tar", "-xf", "-", "-C", str(local_output_dir)],
+            stdin=ssh_process.stdout,
+            capture_output=True,
+            text=False,
+            timeout=copy_timeout + 120,
+            check=False,
+        )
+        ssh_process.stdout.close()
+        ssh_return_code = ssh_process.wait(timeout=30)
+    except subprocess.TimeoutExpired as error:
+        _terminate_process(ssh_process)
+        raise dg.Failure(
+            f"remote artifact transfer exceeded {copy_timeout:g} seconds"
+        ) from error
     if ssh_return_code != 0 or tar_process.returncode != 0:
         detail = tar_process.stderr.decode(errors="replace").strip()
         raise dg.Failure(
@@ -486,10 +580,16 @@ def _copy_remote_artifacts(
 
 def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
     remote = spec["remote"]
+    wall_timeout = _remote_wall_timeout_seconds(spec)
+    timeout_command = (
+        "exec "
+        if wall_timeout is None
+        else f"exec timeout --signal=TERM --kill-after=30s {wall_timeout}s "
+    )
     remote_command = (
         'export PATH="$HOME/.local/bin:$PATH"; '
         f"cd {shlex.quote(remote['project_dir'])} && "
-        "exec uv run python -u -m harness_bloat_bench.remote_worker"
+        f"{timeout_command}uv run python -u -m harness_bloat_bench.remote_worker"
     )
     request = {"dagster_run_id": context.run_id, "spec": spec}
     if api_key := os.environ.get(spec["api_key_var"]):
@@ -501,25 +601,27 @@ def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
     row = None
     try:
         assert process.stdin is not None
-        process.stdin.write(json.dumps(request))
+        process.stdin.write(json.dumps(request).encode())
         process.stdin.close()
-        assert process.stdout is not None
-        for line in process.stdout:
+        local_timeout = wall_timeout + 120 if wall_timeout is not None else None
+        for line in _process_output_lines(process, local_timeout):
             text = line.rstrip()
             if text.startswith(REMOTE_RESULT_PREFIX):
                 row = json.loads(text.removeprefix(REMOTE_RESULT_PREFIX))
             elif text:
                 context.log.info("[%s] %s", remote["host"], text)
-        return_code = process.wait()
+        return_code = process.wait(timeout=30)
+    except (TimeoutError, subprocess.TimeoutExpired) as error:
+        raise dg.Failure(
+            "remote rollout exceeded its outer wall-clock limit"
+            + (f" of {wall_timeout:g} seconds" if wall_timeout is not None else "")
+        ) from error
     finally:
-        if process.poll() is None:
-            process.terminate()
+        _terminate_process(process)
 
     if return_code != 0:
         raise dg.Failure(
@@ -531,9 +633,7 @@ def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
     remote_output_dir = row["output_dir"]
     local_output_dir = Path(spec["output_dir"]) / context.run_id / spec["key"]
     if remote["copy_artifacts"] and not spec["dry_run"]:
-        _copy_remote_artifacts(
-            context, remote, remote_output_dir, local_output_dir
-        )
+        _copy_remote_artifacts(context, remote, remote_output_dir, local_output_dir)
     row["remote_output_dir"] = remote_output_dir
     row["output_dir"] = str(local_output_dir)
     return row
@@ -574,8 +674,7 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
             metadata.update(
                 {
                     "cpu_seconds": row.get("cpu_seconds"),
-                    "peak_memory_gib": row.get("peak_memory_bytes", 0)
-                    / (1024**3),
+                    "peak_memory_gib": row.get("peak_memory_bytes", 0) / (1024**3),
                     "io_read_bytes": row.get("io_read_bytes"),
                     "io_write_bytes": row.get("io_write_bytes"),
                     "peak_pids": row.get("peak_pids"),
@@ -730,9 +829,7 @@ def _database_values(row: dict) -> tuple:
         else None
     )
     error_message = (
-        error.get("message") or error.get("detail")
-        if isinstance(error, dict)
-        else None
+        error.get("message") or error.get("detail") if isinstance(error, dict) else None
     )
     return (
         row["dagster_run_id"],

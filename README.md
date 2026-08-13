@@ -154,6 +154,8 @@ ops:
       remote:
         host: terminal-bench
         project_dir: /home/REMOTE_USER/harness-bloat-bench
+        timeout_grace_seconds: 1800
+        artifact_copy_timeout_seconds: 900
 ```
 
 A complete non-secret example is checked in at `configs/remote.example.yaml`.
@@ -165,6 +167,46 @@ The API key named by `api_key_var` is forwarded over the encrypted SSH stdin
 stream when it exists locally; otherwise it must already exist in the remote
 worker environment. Set `copy_artifacts: false` to keep large trace artifacts
 only on the remote host.
+
+Remote SSH commands use batch mode, a 30-second connection timeout, and
+30-second keepalives with three missed replies allowed. This closes a half-open
+SSH transport in roughly 90 seconds instead of leaving its Dagster rollout slot
+occupied indefinitely. The remote worker is also wrapped in a host-side outer
+deadline. By default that deadline is `rollout_timeout_seconds + 1800` seconds,
+allowing 30 minutes for image setup, scoring, and cleanup around the Verifiers
+harness timeout. Set `remote.wall_timeout_seconds` for an explicit wall-clock
+limit, or adjust `remote.timeout_grace_seconds`. Artifact copying has its own
+900-second limit, configurable with
+`remote.artifact_copy_timeout_seconds`.
+
+### Recovering a completed rollout after SSH loss
+
+A worker can finish and write `traces.jsonl` just as its SSH route disappears.
+In that case Dagster may report a running step even though the remote worker and
+container no longer exist. First verify that the remote trace has
+`is_completed: true`; never recover a partial trace. Then copy the trace and
+restore its outcome row with:
+
+```sh
+./scripts/recover-remote-rollout <dagster-run-id> <rollout-number> [...]
+```
+
+The command reads the original mapped spec from local Dagster storage, copies
+the finalized remote artifacts, and upserts the recovered score, timing, token
+usage, model-call count, and cost into `outputs/results.sqlite`. Resource usage
+may be `NULL` because its cgroup summary normally travels in the lost final SSH
+message. After recovery, terminate the stale SSH client or cancel the stale
+Dagster run to release its concurrency slot. Dagster will still record the
+transport failure, while the benchmark outcome remains preserved in the results
+database.
+
+On 2026-08-13, run `ac064dd5-f953-434c-a454-ebb321df373f` exposed this failure:
+rollouts 363 and 377 had finalized remotely, but a Tailscale route loss left
+their local SSH clients half-open for 18 and 17 hours. Rollout 363 had reached
+the 90-minute harness timeout with reward 0; rollout 377 had completed with
+reward 1. Their traces and result rows were recovered before releasing the two
+stale slots. The keepalive and outer-deadline controls above were added in
+response.
 
 Remote runs currently require explicit `task_ids`; `task_ids: []` performs
 dataset discovery locally and is therefore rejected in SSH mode. The remote

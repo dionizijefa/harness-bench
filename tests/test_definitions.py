@@ -62,9 +62,9 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     assert run.tags[RUN_TYPE_TAG] == "test"
     assert run.tags[DRY_RUN_TAG] == "true"
     assert run.tags[MODEL_TAG] == "model-a,model-b"
-    assert run.tags[HARNESS_TAG] == "codex"
+    assert run.tags[HARNESS_TAG] == "codex_agent"
     assert run.tags[HARNESS_VERSION_TAG] == "0.137.0"
-    assert run.tags[HARNESS_MATRIX_TAG] == "codex@0.137.0"
+    assert run.tags[HARNESS_MATRIX_TAG] == "codex_agent@0.137.0"
     database_path = Path(result.output_for_node("write_results"))
     assert database_path == tmp_path / "results.sqlite"
     with sqlite3.connect(database_path) as connection:
@@ -109,7 +109,7 @@ def test_full_runs_get_matrix_classification_tags() -> None:
 def test_real_test_rollout_can_be_tagged_without_being_a_dry_run() -> None:
     config = MatrixConfig(run_type="test", remote=None)
 
-    tags = _classification_tags(config, [("codex", "0.137.0")])
+    tags = _classification_tags(config, [("codex_agent", "0.137.0")])
 
     assert tags[RUN_TYPE_TAG] == "test"
     assert tags[DRY_RUN_TAG] == "false"
@@ -290,7 +290,7 @@ def test_hard_failure_is_persisted_immediately(tmp_path: Path) -> None:
     spec = {
         "key": "rollout_000001",
         "model": "model-a",
-        "harness": "codex",
+        "harness": "codex_agent",
         "harness_version": "0.130.0",
         "dataset": "terminal-bench/terminal-bench-2-1",
         "task_id": "task-a",
@@ -324,7 +324,7 @@ def test_existing_database_is_migrated_for_batch_ids(tmp_path: Path) -> None:
     spec = {
         "key": "rollout_000001",
         "model": "model-a",
-        "harness": "codex",
+        "harness": "codex_agent",
         "harness_version": "0.130.0",
         "dataset": "terminal-bench/terminal-bench-2-1",
         "task_id": "task-a",
@@ -419,28 +419,6 @@ def test_eval_config_resolves_a_local_harness_plugin(tmp_path: Path) -> None:
     assert config.harness.version == "0.20.0"
 
 
-def test_eval_config_routes_pi_through_the_cache_aware_plugin(tmp_path: Path) -> None:
-    config = _eval_config(
-        {
-            "model": "~deepseek/deepseek-v4-flash-latest",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key_var": "OPENROUTER_API_KEY",
-            "dataset": "terminal-bench/terminal-bench-2-1",
-            "task_id": "crack-7z-hash",
-            "harness": "pi",
-            "harness_version": "0.80.7",
-            "runtime": "docker",
-            "rollout_retries": 0,
-            "max_tokens": None,
-            "temperature": None,
-        },
-        tmp_path,
-    )
-
-    assert config.harness.id == "pi_agent"
-    assert type(config.harness).__module__ == "harness_bloat_bench.harnesses.pi"
-
-
 def test_rollout_prefetches_harness_before_its_recorded_timer(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -513,7 +491,6 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
                             {"id": "claude_code_agent"},
                             {"id": "hermes_agent"},
                             {"id": "opencode"},
-                            {"id": "pi"},
                             {"id": "omp_agent"},
                             {"id": "prime_agent"},
                         ],
@@ -539,7 +516,6 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
         ("claude_code_agent", "2.1.226"),
         ("hermes_agent", "0.20.0"),
         ("opencode", "1.18.1"),
-        ("pi", "0.80.7"),
         ("omp_agent", "17.2.10"),
         ("prime_agent", "0.7.1"),
     }

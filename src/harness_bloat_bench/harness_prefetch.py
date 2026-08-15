@@ -10,7 +10,6 @@ from harness_bloat_bench.harness_cache import (
     ensure_docker_built_tree,
     ensure_omp_cached,
     ensure_opencode_cached,
-    ensure_pi_cached,
 )
 from harness_bloat_bench.harnesses.hermes_agent import (
     HERMES_DIR,
@@ -32,7 +31,7 @@ def ensure_harness_cached(
     """Cache every artifact variant a rollout may need for one harness release."""
     if harness == "claude_code_agent":
         return (ensure_claude_cached(version, arch),)
-    if harness in {"codex", "codex_agent"}:
+    if harness == "codex_agent":
         return (ensure_codex_cached(version, arch),)
     if harness == "hermes_agent":
         return (
@@ -56,8 +55,6 @@ def ensure_harness_cached(
                 ensure_opencode_cached(version, artifact_version, arch, musl=True)
             )
         return tuple(paths)
-    if harness == "pi":
-        return (ensure_pi_cached(version, arch),)
     if harness == "prime_agent":
         return (
             ensure_docker_built_tree(

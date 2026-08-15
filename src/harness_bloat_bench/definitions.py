@@ -26,31 +26,20 @@ from harness_bloat_bench.resource_monitor import (
 )
 
 HarnessId = Literal[
-    "codex",
     "codex_agent",
     "claude_code_agent",
     "hermes_agent",
     "opencode",
-    "pi",
     "omp_agent",
     "prime_agent",
 ]
 DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
-    "codex": "0.137.0",
     "codex_agent": "0.137.0",
     "claude_code_agent": "2.1.226",
     "hermes_agent": "0.20.0",
     "opencode": "1.18.1",
-    "pi": "0.80.7",
     "omp_agent": "17.2.10",
     "prime_agent": "0.7.1",
-}
-# Verifiers' built-in ``codex`` and ``pi`` modules take precedence over local
-# packages with the same names. Route those public benchmark IDs through unique
-# plugin IDs so they always resolve to this project's cache-aware adapters.
-HARNESS_PLUGIN_IDS = {
-    "codex": "codex_agent",
-    "pi": "pi_agent",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 RUN_TYPE_TAG = "harness_bloat/run_type"
@@ -82,7 +71,7 @@ IMAGE_INPUT_TASK_IDS = frozenset(
 
 
 class HarnessSpec(dg.Config):
-    id: HarnessId = "codex"
+    id: HarnessId = "codex_agent"
     version: str | None = None
 
 
@@ -120,10 +109,10 @@ def _remote_dict(remote: SSHExecutionConfig | dict | None) -> dict | None:
 class MatrixConfig(dg.Config):
     batch_id: str | None = None
     models: list[str] = ["~deepseek/deepseek-v4-flash-latest"]
-    # Empty means the default Codex harness. Dagster requires nested-config list
+    # Empty means the default Codex Agent harness. Dagster requires nested-config list
     # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
     harnesses: list[HarnessSpec] = []
-    # Compatibility with the original Codex-only launch schema. New configs should
+    # Compatibility with the original Codex Agent-only launch schema. New configs should
     # pair ids and versions through ``harnesses`` instead.
     harness_versions: list[str] = []
     task_ids: list[str] = ["crack-7z-hash"]
@@ -169,16 +158,19 @@ def _harness_specs(config: MatrixConfig) -> list[tuple[HarnessId, str]]:
     if config.harness_versions:
         default_only = not config.harnesses or (
             len(config.harnesses) == 1
-            and config.harnesses[0].id == "codex"
-            and config.harnesses[0].version in (None, DEFAULT_HARNESS_VERSIONS["codex"])
+            and config.harnesses[0].id == "codex_agent"
+            and config.harnesses[0].version
+            in (None, DEFAULT_HARNESS_VERSIONS["codex_agent"])
         )
         if not default_only:
             raise dg.Failure(
-                "harness_versions is the legacy Codex-only option; use "
+                "harness_versions is the legacy Codex Agent-only option; use "
                 "harnesses: [{id: ..., version: ...}] for multiple harnesses"
             )
         return list(
-            dict.fromkeys(("codex", version) for version in config.harness_versions)
+            dict.fromkeys(
+                ("codex_agent", version) for version in config.harness_versions
+            )
         )
 
     entries = config.harnesses or [HarnessSpec()]
@@ -309,7 +301,7 @@ def plan_rollouts(
 
 
 def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
-    public_harness_id = spec.get("harness", "codex")
+    harness_id = spec.get("harness", "codex_agent")
     sampling = {
         key: spec[key] for key in ("max_tokens", "temperature") if spec[key] is not None
     }
@@ -335,7 +327,7 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
                 "tasks": [spec["task_id"]],
             },
             "harness": {
-                "id": HARNESS_PLUGIN_IDS.get(public_harness_id, public_harness_id),
+                "id": harness_id,
                 "version": spec["harness_version"],
                 "runtime": runtime,
             },

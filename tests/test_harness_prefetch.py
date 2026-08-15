@@ -9,11 +9,9 @@ from harness_bloat_bench import harness_prefetch
     ("harness", "target"),
     [
         ("claude_code_agent", "ensure_claude_cached"),
-        ("codex", "ensure_codex_cached"),
         ("codex_agent", "ensure_codex_cached"),
         ("hermes_agent", "ensure_docker_built_tree"),
         ("omp_agent", "ensure_omp_cached"),
-        ("pi", "ensure_pi_cached"),
         ("prime_agent", "ensure_docker_built_tree"),
     ],
 )

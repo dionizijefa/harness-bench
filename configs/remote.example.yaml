@@ -6,7 +6,6 @@ ops:
         - id: claude_code_agent
         - id: hermes_agent
         - id: opencode
-        - id: pi
         - id: omp_agent
         - id: prime_agent
       task_ids: [adaptive-rejection-sampler]

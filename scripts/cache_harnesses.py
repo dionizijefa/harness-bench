@@ -19,7 +19,6 @@ HARNESSES = (
     "hermes_agent",
     "omp_agent",
     "opencode",
-    "pi",
     "prime_agent",
 )
 

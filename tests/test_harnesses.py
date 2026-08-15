@@ -9,7 +9,6 @@ from verifiers.v1.runtimes import ProgramResult
 
 from harness_bloat_bench.definitions import (
     DEFAULT_HARNESS_VERSIONS,
-    HARNESS_PLUGIN_IDS,
     HarnessId,
 )
 from harness_bloat_bench.harnesses.claude_code import (
@@ -53,7 +52,6 @@ from harness_bloat_bench.harnesses.opencode import (
 from harness_bloat_bench.harnesses.opencode import (
     _install_script as opencode_install_script,
 )
-from harness_bloat_bench.harnesses.pi import PI_BIN, PiHarness, PiHarnessConfig
 from harness_bloat_bench.harnesses.prime_agent import (
     PRIME_AGENT_CLI,
     PRIME_AGENT_KERNEL_VENV,
@@ -109,7 +107,16 @@ def context():
 
 
 def test_every_declared_harness_has_a_default_version() -> None:
-    assert set(get_args(HarnessId)) == set(DEFAULT_HARNESS_VERSIONS)
+    expected = {
+        "codex_agent",
+        "claude_code_agent",
+        "hermes_agent",
+        "opencode",
+        "omp_agent",
+        "prime_agent",
+    }
+    assert set(get_args(HarnessId)) == expected
+    assert set(DEFAULT_HARNESS_VERSIONS) == expected
 
 
 @pytest.mark.parametrize("harness_id", get_args(HarnessId))
@@ -119,10 +126,9 @@ def test_every_harness_resolves_sets_up_and_runs(
     """Exercise the production plugin boundary without network or model calls."""
     runtime = FakeRuntime()
     rollout_trace = trace()
-    plugin_id = HARNESS_PLUGIN_IDS.get(harness_id, harness_id)
-    config_class = harness_config_type(plugin_id)
+    config_class = harness_config_type(harness_id)
     config = config_class.model_validate(
-        {"id": plugin_id, "version": DEFAULT_HARNESS_VERSIONS[harness_id]}
+        {"id": harness_id, "version": DEFAULT_HARNESS_VERSIONS[harness_id]}
     )
     harness = load_harness(config)
     cached_file = tmp_path / "cached-binary"
@@ -139,10 +145,6 @@ def test_every_harness_resolves_sets_up_and_runs(
             "harness_bloat_bench.harnesses.codex_agent.ensure_codex_cached",
             cached_file,
         ),
-        "codex": (
-            "harness_bloat_bench.harnesses.codex_agent.ensure_codex_cached",
-            cached_file,
-        ),
         "hermes_agent": (
             "harness_bloat_bench.harnesses.hermes_agent.ensure_docker_built_tree",
             cached_tree,
@@ -154,10 +156,6 @@ def test_every_harness_resolves_sets_up_and_runs(
         "opencode": (
             "harness_bloat_bench.harnesses.opencode.ensure_opencode_cached",
             cached_file,
-        ),
-        "pi": (
-            "harness_bloat_bench.harnesses.pi.ensure_pi_cached",
-            cached_tree,
         ),
         "prime_agent": (
             "harness_bloat_bench.harnesses.prime_agent.ensure_docker_built_tree",
@@ -549,39 +547,6 @@ def test_opencode_config_tracks_versioned_schema(
         assert config["provider"]["verifiers"]["options"]["apiKey"] == (
             "{env:VF_INTERCEPT_KEY}"
         )
-
-
-def test_pi_launch_uses_full_coding_toolset_and_ephemeral_state() -> None:
-    runtime = FakeRuntime()
-    harness = PiHarness(PiHarnessConfig(id="pi", disabled_tools=["write"]))
-
-    asyncio.run(
-        harness.launch(
-            context(),
-            trace(),
-            runtime,
-            "http://127.0.0.1:9000/v1",
-            "session-secret",
-            {},
-        )
-    )
-
-    assert runtime.program is not None
-    argv, env = runtime.program
-    models_path = "/tmp/vf-pi-agent-trace-123/models.json"
-    models = json.loads(runtime.writes[models_path])
-    provider = models["providers"]["verifiers"]
-    assert argv[0] == PI_BIN
-    assert argv[argv.index("--tools") + 1] == "read,bash,edit,grep,find,ls"
-    assert argv[argv.index("--thinking") + 1] == "medium"
-    assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
-    assert argv[-2:] == ["--print", "Fix the tests"]
-    assert "session-secret" not in argv
-    assert provider["baseUrl"].endswith("/v1")
-    assert provider["apiKey"] == "$VF_INTERCEPT_KEY"
-    assert provider["models"][0]["maxTokens"] == 32_000
-    assert env["PI_CODING_AGENT_DIR"] == "/tmp/vf-pi-agent-trace-123"
-    assert env["PI_OFFLINE"] == "1"
 
 
 def test_omp_launch_keeps_stock_agent_and_wires_mcp() -> None:

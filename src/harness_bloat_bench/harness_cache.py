@@ -192,7 +192,7 @@ def ensure_codex_cached(version: str, arch: str | None = None) -> Path:
     triple = f"{triple_arch}-unknown-linux-musl"
     normalized_version = version.removeprefix("v")
     return _ensure_release_file(
-        harness="codex",
+        harness="codex_agent",
         version=normalized_version,
         arch=normalized_arch,
         filename="codex",
@@ -329,20 +329,6 @@ def _ensure_release_tree(
     raise RuntimeError(
         f"failed to cache {harness} {version} ({arch}) after {attempts} attempts: "
         f"{last_error}"
-    )
-
-
-def ensure_pi_cached(version: str, arch: str | None = None) -> Path:
-    normalized_arch = linux_arch(arch)
-    normalized_version = version.removeprefix("v")
-    return _ensure_release_tree(
-        harness="pi",
-        version=normalized_version,
-        arch=normalized_arch,
-        url=(
-            "https://github.com/earendil-works/pi-mono/releases/download/"
-            f"v{normalized_version}/pi-linux-{normalized_arch}.tar.gz"
-        ),
     )
 
 

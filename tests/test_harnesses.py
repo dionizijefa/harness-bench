@@ -7,7 +7,11 @@ import pytest
 from verifiers.v1.loaders import harness_config_type, load_harness
 from verifiers.v1.runtimes import ProgramResult
 
-from harness_bloat_bench.definitions import DEFAULT_HARNESS_VERSIONS, HarnessId
+from harness_bloat_bench.definitions import (
+    DEFAULT_HARNESS_VERSIONS,
+    HARNESS_PLUGIN_IDS,
+    HarnessId,
+)
 from harness_bloat_bench.harnesses.claude_code import (
     ClaudeCodeHarness,
     ClaudeCodeHarnessConfig,
@@ -109,15 +113,59 @@ def test_every_declared_harness_has_a_default_version() -> None:
 
 
 @pytest.mark.parametrize("harness_id", get_args(HarnessId))
-def test_every_harness_resolves_sets_up_and_runs(harness_id: str) -> None:
+def test_every_harness_resolves_sets_up_and_runs(
+    harness_id: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """Exercise the production plugin boundary without network or model calls."""
     runtime = FakeRuntime()
     rollout_trace = trace()
-    config_class = harness_config_type(harness_id)
+    plugin_id = HARNESS_PLUGIN_IDS.get(harness_id, harness_id)
+    config_class = harness_config_type(plugin_id)
     config = config_class.model_validate(
-        {"id": harness_id, "version": DEFAULT_HARNESS_VERSIONS[harness_id]}
+        {"id": plugin_id, "version": DEFAULT_HARNESS_VERSIONS[harness_id]}
     )
     harness = load_harness(config)
+    cached_file = tmp_path / "cached-binary"
+    cached_file.write_bytes(b"cached harness binary")
+    cached_tree = tmp_path / "cached-tree"
+    cached_tree.mkdir()
+    (cached_tree / "artifact").write_bytes(b"cached harness tree")
+    cache_patches = {
+        "claude_code_agent": (
+            "harness_bloat_bench.harnesses.claude_code.ensure_claude_cached",
+            cached_file,
+        ),
+        "codex_agent": (
+            "harness_bloat_bench.harnesses.codex_agent.ensure_codex_cached",
+            cached_file,
+        ),
+        "codex": (
+            "harness_bloat_bench.harnesses.codex_agent.ensure_codex_cached",
+            cached_file,
+        ),
+        "hermes_agent": (
+            "harness_bloat_bench.harnesses.hermes_agent.ensure_docker_built_tree",
+            cached_tree,
+        ),
+        "omp_agent": (
+            "harness_bloat_bench.harnesses.omp_agent.ensure_omp_cached",
+            cached_file,
+        ),
+        "opencode": (
+            "harness_bloat_bench.harnesses.opencode.ensure_opencode_cached",
+            cached_file,
+        ),
+        "pi": (
+            "harness_bloat_bench.harnesses.pi.ensure_pi_cached",
+            cached_tree,
+        ),
+        "prime_agent": (
+            "harness_bloat_bench.harnesses.prime_agent.ensure_docker_built_tree",
+            cached_tree,
+        ),
+    }
+    target, cached = cache_patches[harness_id]
+    monkeypatch.setattr(target, lambda *args, **kwargs: cached)
     mcp_urls = (
         {"task-tools": "http://127.0.0.1:9001/mcp"} if harness.SUPPORTS_MCP else {}
     )
@@ -134,6 +182,17 @@ def test_every_harness_resolves_sets_up_and_runs(harness_id: str) -> None:
         )
 
     asyncio.run(exercise())
+
+    setup_commands = "\n".join(" ".join(argv) for argv, _ in runtime.commands)
+    for network_install_marker in (
+        "curl ",
+        "git clone",
+        "npm install",
+        "registry.npmjs.org",
+        "downloads.claude.ai",
+        "github.com/can1357/oh-my-pi/releases",
+    ):
+        assert network_install_marker not in setup_commands
 
     assert rollout_trace.stop_reason == "agent_completed"
     assert runtime.commands, f"{harness_id} setup did not invoke the runtime"
@@ -162,7 +221,8 @@ def test_requested_codex_versions_use_pinned_release_artifacts(version: str) -> 
     script = codex_install_script(version)
 
     assert f"VERSION={version}" in script
-    assert f"releases/download/rust-v{version}/codex-" in script
+    assert "github.com" not in script
+    assert "curl" not in script
     assert 'current="$($BIN --version 2>/dev/null || true)"' in script
     assert '"codex-cli $VERSION"' in script
 
@@ -258,13 +318,14 @@ CLAUDE_CODE_HISTORY_VERSIONS = [
 
 
 @pytest.mark.parametrize("version", CLAUDE_CODE_HISTORY_VERSIONS)
-def test_requested_claude_code_versions_use_pinned_official_installer(
+def test_requested_claude_code_versions_verify_cached_binary(
     version: str,
 ) -> None:
     script = claude_code_install_script(version)
 
-    assert "https://claude.ai/install.sh" in script
-    assert f"bash -s {version}" in script
+    assert "claude.ai" not in script
+    assert "curl" not in script
+    assert version in script
 
 
 def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
@@ -337,6 +398,7 @@ def test_requested_prime_agent_versions_use_pinned_release_artifacts(
     assert f"releases/download/v{version}/prime-agent-{version}.tgz" in script
     assert "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1" in script
     assert "nodejs.org/dist/v$NODE_VERSION" in script
+    assert 'PATH="$NODE_DIR/bin:$PATH"' in script
 
 
 def test_prime_agent_launch_keeps_stock_rlm_surface() -> None:
@@ -433,10 +495,11 @@ def test_opencode_launch_uses_isolated_config() -> None:
         "1.18.13",
     ],
 )
-def test_requested_opencode_versions_use_pinned_npm_artifacts(version: str) -> None:
+def test_requested_opencode_versions_verify_cached_artifacts(version: str) -> None:
     script = opencode_install_script(version)
 
-    assert "registry.npmjs.org/$package/-/$package-$ARTIFACT_VERSION.tgz" in script
+    assert "registry.npmjs.org" not in script
+    assert "curl" not in script
     assert f"VERSION={version}" in script
     if version == "0.1.196":
         assert "ARTIFACT_VERSION=0.1.195" in script
@@ -583,7 +646,9 @@ def test_requested_omp_versions_use_pinned_release_artifacts(version: str) -> No
     script = omp_install_script(version)
 
     assert f"VERSION={version}" in script
-    assert 'releases/download/v$VERSION/omp-linux-$arch' in script
+    assert "github.com" not in script
+    assert "curl" not in script
+    assert "cached OMP binary version mismatch" in script
 
 
 @pytest.mark.parametrize(

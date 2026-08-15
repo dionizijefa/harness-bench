@@ -1,5 +1,6 @@
 """Oh My Pi (OMP) coding-agent harness."""
 
+import asyncio
 import logging
 import shlex
 from typing import Literal
@@ -8,6 +9,8 @@ from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import ensure_omp_cached, stage_cached_file
 
 from ._common import (
     DEFAULT_CONTEXT_WINDOW,
@@ -44,38 +47,14 @@ def _install_script(version: str) -> str:
     return f"""\
 set -eu
 {shell_assignment("VERSION", version)}
-DIR={shlex.quote(OMP_DIR)}
 BIN={shlex.quote(OMP_BIN)}
 
-current="$($BIN --version 2>/dev/null || true)"
-if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ] || [ "$current" = "omp/$VERSION" ]; }}; then
-    exit 0
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get -o Acquire::Retries=3 update -qq
-        apt-get -o Acquire::Retries=3 install -y -qq curl ca-certificates >/dev/null
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl ca-certificates >/dev/null
-    else
-        echo "OMP needs curl and CA certificates" >&2
-        exit 1
-    fi
-fi
-
-case "$(uname -m)" in
-    aarch64|arm64) arch=arm64 ;;
-    x86_64|amd64) arch=x64 ;;
-    *) echo "unsupported OMP architecture: $(uname -m)" >&2; exit 1 ;;
+chmod 755 "$BIN"
+current="$($BIN --version 2>&1 || true)"
+case "$current" in
+    "$VERSION"|"v$VERSION"|"omp/$VERSION"|*" $VERSION"*) exit 0 ;;
+    *) echo "cached OMP binary version mismatch: expected $VERSION, got $current" >&2; exit 1 ;;
 esac
-
-mkdir -p "$DIR/bin"
-tmp="$BIN.tmp"
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL "https://github.com/can1357/oh-my-pi/releases/download/v$VERSION/omp-linux-$arch" -o "$tmp"
-chmod 755 "$tmp"
-mv -f "$tmp" "$BIN"
 """
 
 
@@ -93,7 +72,9 @@ class OmpAgentHarness(Harness[OmpAgentHarnessConfig]):
     SUPPORTS_MCP = True
 
     async def setup(self, runtime: Runtime) -> None:
-        logger.info("omp-agent: ensuring OMP %s is installed", self.config.version)
+        logger.info("omp-agent: loading cached OMP %s", self.config.version)
+        cached_binary = await asyncio.to_thread(ensure_omp_cached, self.config.version)
+        await stage_cached_file(runtime, cached_binary, OMP_BIN)
         await run_install(
             runtime, "OMP", self.config.version, _install_script(self.config.version)
         )

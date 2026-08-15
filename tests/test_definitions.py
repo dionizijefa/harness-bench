@@ -8,6 +8,7 @@ from verifiers.v1.types import Usage
 
 import harness_bloat_bench.definitions as definitions
 from harness_bloat_bench.definitions import (
+    BATCH_ID_TAG,
     DRY_RUN_TAG,
     HARNESS_MATRIX_TAG,
     HARNESS_TAG,
@@ -20,6 +21,7 @@ from harness_bloat_bench.definitions import (
     _classification_tags,
     _configured_remote,
     _eval_config,
+    _execute_rollout,
     _hard_failure_row,
     _persist_rollout_row,
     _remote_dict,
@@ -40,6 +42,7 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
             "ops": {
                 "plan_rollouts": {
                     "config": {
+                        "batch_id": "experiment-2026-08-15-a",
                         "models": ["model-a", "model-b"],
                         "harness_versions": ["0.137.0"],
                         "task_ids": ["terminal-bench/task-a"],
@@ -55,6 +58,7 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     assert result.success
     run = instance.get_run_by_id(result.run_id)
     assert run is not None
+    assert run.tags[BATCH_ID_TAG] == "experiment-2026-08-15-a"
     assert run.tags[RUN_TYPE_TAG] == "test"
     assert run.tags[DRY_RUN_TAG] == "true"
     assert run.tags[MODEL_TAG] == "model-a,model-b"
@@ -66,16 +70,16 @@ def test_dry_run_matrix(tmp_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         stored = connection.execute(
             """
-            SELECT model, task_id, status
+            SELECT batch_id, model, task_id, status
             FROM rollout_results
             ORDER BY rollout_key
             """
         ).fetchall()
     assert stored == [
-        ("model-a", "task-a", "dry_run"),
-        ("model-a", "task-a", "dry_run"),
-        ("model-b", "task-a", "dry_run"),
-        ("model-b", "task-a", "dry_run"),
+        ("experiment-2026-08-15-a", "model-a", "task-a", "dry_run"),
+        ("experiment-2026-08-15-a", "model-a", "task-a", "dry_run"),
+        ("experiment-2026-08-15-a", "model-b", "task-a", "dry_run"),
+        ("experiment-2026-08-15-a", "model-b", "task-a", "dry_run"),
     ]
 
 
@@ -316,6 +320,33 @@ def test_hard_failure_is_persisted_immediately(tmp_path: Path) -> None:
     )
 
 
+def test_existing_database_is_migrated_for_batch_ids(tmp_path: Path) -> None:
+    spec = {
+        "key": "rollout_000001",
+        "model": "model-a",
+        "harness": "codex",
+        "harness_version": "0.130.0",
+        "dataset": "terminal-bench/terminal-bench-2-1",
+        "task_id": "task-a",
+        "rollout": 1,
+        "output_dir": str(tmp_path),
+    }
+    row = _hard_failure_row(spec, "run-a", RuntimeError("failed"), 1.0)
+    database_path = _persist_rollout_row(row)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX rollout_results_batch")
+        connection.execute("ALTER TABLE rollout_results DROP COLUMN batch_id")
+
+    row["batch_id"] = "experiment-a"
+    _persist_rollout_row(row)
+
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            "SELECT batch_id FROM rollout_results"
+        ).fetchone()
+    assert stored == ("experiment-a",)
+
+
 def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     config = _eval_config(
         {
@@ -338,6 +369,7 @@ def test_eval_config_uses_v1_components(tmp_path: Path) -> None:
     assert type(config.taskset).__name__ == "HarborConfig"
     assert config.taskset.tasks == ["crack-7z-hash"]
     assert type(config.harness).__name__ == "CodexHarnessConfig"
+    assert config.harness.id == "codex_agent"
     assert config.harness.runtime.type == "docker"
     assert config.harness.runtime.cpu == 10.0
     assert config.harness.runtime.memory == 18.0
@@ -385,6 +417,88 @@ def test_eval_config_resolves_a_local_harness_plugin(tmp_path: Path) -> None:
 
     assert type(config.harness).__name__ == "HermesAgentHarnessConfig"
     assert config.harness.version == "0.20.0"
+
+
+def test_eval_config_routes_pi_through_the_cache_aware_plugin(tmp_path: Path) -> None:
+    config = _eval_config(
+        {
+            "model": "~deepseek/deepseek-v4-flash-latest",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_var": "OPENROUTER_API_KEY",
+            "dataset": "terminal-bench/terminal-bench-2-1",
+            "task_id": "crack-7z-hash",
+            "harness": "pi",
+            "harness_version": "0.80.7",
+            "runtime": "docker",
+            "rollout_retries": 0,
+            "max_tokens": None,
+            "temperature": None,
+        },
+        tmp_path,
+    )
+
+    assert config.harness.id == "pi_agent"
+    assert type(config.harness).__module__ == "harness_bloat_bench.harnesses.pi"
+
+
+def test_rollout_prefetches_harness_before_its_recorded_timer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    events: list[object] = []
+
+    def fake_prefetch(harness: str, version: str) -> None:
+        events.append(("cache", harness, version))
+
+    async def fake_run_eval(environment, config):
+        events.append("eval")
+        return [
+            SimpleNamespace(
+                id="trace-1",
+                error=None,
+                reward=1,
+                rewards={},
+                usage=None,
+                calls=[],
+                num_input_tokens=1,
+                num_output_tokens=2,
+                num_total_tokens=3,
+            )
+        ]
+
+    ticks = iter([10.0, 13.0])
+    monkeypatch.setattr(definitions, "ensure_harness_cached", fake_prefetch)
+    monkeypatch.setattr(definitions, "run_eval", fake_run_eval)
+    monkeypatch.setattr(definitions, "reset_resource_usage", lambda: None)
+    monkeypatch.setattr(definitions, "enable_docker_resource_monitoring", lambda: None)
+    monkeypatch.setattr(definitions, "consume_resource_usage", lambda: {})
+    monkeypatch.setattr(definitions.time, "perf_counter", lambda: next(ticks))
+
+    row = _execute_rollout(
+        {
+            "key": "rollout_000001",
+            "model": "model-a",
+            "harness": "omp_agent",
+            "harness_version": "17.2.10",
+            "dataset": "terminal-bench/terminal-bench-2-1",
+            "task_id": "task-a",
+            "rollout": 1,
+            "runtime": "docker",
+            "container_cpus": 8.0,
+            "container_memory_gb": 18.0,
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_var": "OPENROUTER_API_KEY",
+            "max_tokens": None,
+            "temperature": None,
+            "rollout_timeout_seconds": 5_400.0,
+            "rollout_retries": 0,
+            "output_dir": str(tmp_path),
+            "dry_run": False,
+        },
+        "run-1",
+    )
+
+    assert events == [("cache", "omp_agent", "17.2.10"), "eval"]
+    assert row["runtime_seconds"] == 3.0
 
 
 def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:

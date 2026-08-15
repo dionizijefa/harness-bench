@@ -18,6 +18,7 @@ from verifiers.v1.configs.eval import EvalConfig
 from verifiers.v1.env import Environment
 from verifiers.v1.tasksets.harbor import HarborConfig, HarborTaskset
 
+from harness_bloat_bench.harness_prefetch import ensure_harness_cached
 from harness_bloat_bench.resource_monitor import (
     consume_resource_usage,
     enable_docker_resource_monitoring,
@@ -44,6 +45,13 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "omp_agent": "17.2.10",
     "prime_agent": "0.7.1",
 }
+# Verifiers' built-in ``codex`` and ``pi`` modules take precedence over local
+# packages with the same names. Route those public benchmark IDs through unique
+# plugin IDs so they always resolve to this project's cache-aware adapters.
+HARNESS_PLUGIN_IDS = {
+    "codex": "codex_agent",
+    "pi": "pi_agent",
+}
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
 RUN_TYPE_TAG = "harness_bloat/run_type"
 DRY_RUN_TAG = "harness_bloat/dry_run"
@@ -51,6 +59,7 @@ MODEL_TAG = "harness_bloat/model"
 HARNESS_TAG = "harness_bloat/harness"
 HARNESS_VERSION_TAG = "harness_bloat/harness_version"
 HARNESS_MATRIX_TAG = "harness_bloat/harness_matrix"
+BATCH_ID_TAG = "harness_bloat/batch_id"
 
 # Terminal-Bench tasks that require sending images to the model. Keep these out of
 # every rollout matrix because the benchmark's default text-only models cannot run
@@ -109,6 +118,7 @@ def _remote_dict(remote: SSHExecutionConfig | dict | None) -> dict | None:
 
 
 class MatrixConfig(dg.Config):
+    batch_id: str | None = None
     models: list[str] = ["~deepseek/deepseek-v4-flash-latest"]
     # Empty means the default Codex harness. Dagster requires nested-config list
     # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
@@ -140,7 +150,7 @@ def _classification_tags(
     models = list(dict.fromkeys(config.models))
     harnesses = list(dict.fromkeys(harness for harness, _ in harness_specs))
     versions = list(dict.fromkeys(version for _, version in harness_specs))
-    return {
+    tags = {
         RUN_TYPE_TAG: "test" if config.dry_run else config.run_type,
         DRY_RUN_TAG: str(config.dry_run).lower(),
         MODEL_TAG: ",".join(models),
@@ -150,6 +160,9 @@ def _classification_tags(
             f"{harness}@{version}" for harness, version in harness_specs
         ),
     }
+    if config.batch_id is not None:
+        tags[BATCH_ID_TAG] = config.batch_id
+    return tags
 
 
 def _harness_specs(config: MatrixConfig) -> list[tuple[HarnessId, str]]:
@@ -226,6 +239,8 @@ def plan_rollouts(
 
     if config.num_rollouts < 1:
         raise dg.Failure("num_rollouts must be at least 1")
+    if config.batch_id is not None and not config.batch_id.strip():
+        raise dg.Failure("batch_id must contain at least one non-whitespace character")
     if (
         config.rollout_timeout_seconds is not None
         and config.rollout_timeout_seconds <= 0
@@ -260,6 +275,7 @@ def plan_rollouts(
         yield dg.DynamicOutput(
             {
                 "key": key,
+                "batch_id": config.batch_id,
                 "model": model,
                 "harness": harness,
                 "harness_version": version,
@@ -293,6 +309,7 @@ def plan_rollouts(
 
 
 def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
+    public_harness_id = spec.get("harness", "codex")
     sampling = {
         key: spec[key] for key in ("max_tokens", "temperature") if spec[key] is not None
     }
@@ -318,7 +335,7 @@ def _eval_config(spec: dict, output_dir: Path) -> EvalConfig:
                 "tasks": [spec["task_id"]],
             },
             "harness": {
-                "id": spec.get("harness", "codex"),
+                "id": HARNESS_PLUGIN_IDS.get(public_harness_id, public_harness_id),
                 "version": spec["harness_version"],
                 "runtime": runtime,
             },
@@ -342,6 +359,7 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
     output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
     base = {
         "dagster_run_id": dagster_run_id,
+        "batch_id": spec.get("batch_id"),
         "rollout_key": spec["key"],
         "model": spec["model"],
         "harness": spec["harness"],
@@ -361,6 +379,10 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
     if spec["dry_run"]:
         return {**base, "status": "dry_run", "passed": None, "reward": None}
 
+    # Cache acquisition is deliberately outside runtime_seconds. On a cold host,
+    # concurrent rollout processes serialize on the per-release cache lock; none
+    # of their benchmark timings include release downloads or dependency builds.
+    ensure_harness_cached(spec["harness"], spec["harness_version"])
     started = time.perf_counter()
     reset_resource_usage()
     if spec["runtime"] == "docker":
@@ -421,6 +443,7 @@ def _hard_failure_row(
     output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
     return {
         "dagster_run_id": dagster_run_id,
+        "batch_id": spec.get("batch_id"),
         "rollout_key": spec["key"],
         "model": spec["model"],
         "harness": spec["harness"],
@@ -670,6 +693,8 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
             "container_memory_limit_gb": row.get("container_memory_limit_gb"),
             "database": dg.MetadataValue.path(str(database_path)),
         }
+        if spec.get("batch_id") is not None:
+            metadata["batch_id"] = spec["batch_id"]
         if row.get("resource_usage_source"):
             metadata.update(
                 {
@@ -704,6 +729,7 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 """
                 CREATE TABLE IF NOT EXISTS rollout_results (
                     dagster_run_id TEXT NOT NULL,
+                    batch_id TEXT,
                     rollout_key TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     model TEXT NOT NULL,
@@ -765,14 +791,20 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 "io_write_bytes": "INTEGER",
                 "peak_pids": "INTEGER",
                 "oom_kill_count": "INTEGER",
+                "batch_id": "TEXT",
             }.items():
                 if column not in existing_columns:
                     connection.execute(
                         f"ALTER TABLE rollout_results ADD COLUMN {column} {column_type}"
                     )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS rollout_results_batch "
+                "ON rollout_results (batch_id)"
+            )
 
             columns = (
                 "dagster_run_id",
+                "batch_id",
                 "rollout_key",
                 "timestamp",
                 "model",
@@ -833,6 +865,7 @@ def _database_values(row: dict) -> tuple:
     )
     return (
         row["dagster_run_id"],
+        row.get("batch_id"),
         row["rollout_key"],
         row["timestamp"],
         row["model"],
@@ -890,6 +923,8 @@ def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
         "rollouts": len(rows),
         "passed": sum(row.get("passed") is True for row in rows),
     }
+    if rows[0].get("batch_id") is not None:
+        metadata["batch_id"] = rows[0]["batch_id"]
     if measured:
         metadata.update(
             {

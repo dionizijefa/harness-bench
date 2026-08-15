@@ -1,5 +1,6 @@
 """Claude Code harness routed through the Anthropic Messages interceptor."""
 
+import asyncio
 import logging
 import shlex
 from typing import cast
@@ -11,6 +12,8 @@ from verifiers.v1.clients import EvalClient, ModelContext
 from verifiers.v1.harness import Harness
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import ensure_claude_cached, stage_cached_file
 
 from ._common import json_bytes, release_version, run_install
 
@@ -32,10 +35,16 @@ def _claude_bin(version: str) -> str:
 def _install_script(version: str) -> str:
     version = release_version(version)
     _version_tuple(version)
-    return stock_claude.INSTALL.format(
-        version=version,
-        home=stock_claude.CLAUDE_HOME.format(version=version),
-    )
+    binary = _claude_bin(version)
+    return f"""\
+set -eu
+chmod 755 {shlex.quote(binary)}
+current="$({shlex.quote(binary)} --version 2>/dev/null || true)"
+case "$current" in
+    "$VERSION"|"v$VERSION"|"$VERSION "*|*" $VERSION") exit 0 ;;
+    *) echo "cached Claude Code binary version mismatch: expected {version}, got $current" >&2; exit 1 ;;
+esac
+""".replace("$VERSION", version)
 
 
 def _configure_anthropic_upstream(client: EvalClient) -> None:
@@ -67,7 +76,9 @@ class ClaudeCodeHarness(Harness[ClaudeCodeHarnessConfig]):
         version = release_version(self.config.version)
         home = stock_claude.CLAUDE_HOME.format(version=version)
         binary = _claude_bin(version)
-        install = shlex.quote(f"[ -x {binary} ] || ({_install_script(version)})")
+        cached_binary = await asyncio.to_thread(ensure_claude_cached, version)
+        await stage_cached_file(runtime, cached_binary, binary)
+        install = shlex.quote(_install_script(version))
         guarded = (
             f"mkdir -p {shlex.quote(home)} && "
             f'"$(command -v flock || command -v lockf)" '

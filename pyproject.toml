@@ -32,6 +32,7 @@ packages = [
     "src/hermes_agent",
     "src/opencode",
     "src/pi",
+    "src/pi_agent",
     "src/omp_agent",
     "src/prime_agent",
 ]

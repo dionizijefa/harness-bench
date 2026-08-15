@@ -1,5 +1,6 @@
 """PrimeAgent harness with its stock IPython/RLM coding surface."""
 
+import asyncio
 import logging
 import shlex
 from typing import Literal
@@ -8,6 +9,11 @@ from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import (
+    ensure_docker_built_tree,
+    stage_cached_tree,
+)
 
 from ._common import (
     DEFAULT_CONTEXT_WINDOW,
@@ -70,6 +76,7 @@ case "$current" in
 esac
 
 mkdir -p "$DIR/home" "$PREFIX"
+PATH="$NODE_DIR/bin:$PATH" \
 HOME="$DIR/home" \
 PRIME_AGENT_CODING_AGENT_DIR="$DIR/shared-agent" \
 PRIME_AGENT_KERNEL_VENV="$KERNEL_VENV" \
@@ -100,9 +107,24 @@ class PrimeAgentHarness(Harness[PrimeAgentHarnessConfig]):
 
     async def setup(self, runtime: Runtime) -> None:
         logger.info(
-            "prime-agent: ensuring PrimeAgent %s is installed", self.config.version
+            "prime-agent: loading cached PrimeAgent %s", self.config.version
         )
-        script = _install_script(self.config.version)
+        cached_tree = await asyncio.to_thread(
+            ensure_docker_built_tree,
+            harness="prime-agent",
+            version=self.config.version,
+            source_dir=PRIME_AGENT_DIR,
+            install_script=_install_script(self.config.version),
+            bundle_python_runtime=False,
+        )
+        await stage_cached_tree(runtime, cached_tree, PRIME_AGENT_DIR)
+        script = f"""\
+set -eu
+test -x {shlex.quote(PRIME_AGENT_NODE_BIN)}
+test -f {shlex.quote(PRIME_AGENT_CLI)}
+test -x {shlex.quote(f'{PRIME_AGENT_KERNEL_VENV}/bin/python')}
+{shlex.quote(PRIME_AGENT_NODE_BIN)} {shlex.quote(PRIME_AGENT_CLI)} --version >/dev/null
+"""
         guarded = (
             f"mkdir -p {shlex.quote(PRIME_AGENT_DIR)} && "
             f"flock {shlex.quote(f'{PRIME_AGENT_DIR}/install.lock')} "

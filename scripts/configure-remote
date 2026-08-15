@@ -61,6 +61,8 @@ def main() -> None:
             "--exclude",
             ".env*",
             "--exclude",
+            ".harness-cache",
+            "--exclude",
             "outputs",
             f"{repo_root}/",
             f"{args.host}:{project_dir.rstrip('/')}/",
@@ -74,6 +76,19 @@ def main() -> None:
             "--",
             args.host,
             f'export PATH="$HOME/.local/bin:$PATH"; cd {remote_dir} && uv sync',
+        ]
+    )
+
+    print("Caching configured harness releases on the remote worker...")
+    run(
+        [
+            "ssh",
+            "--",
+            args.host,
+            (
+                f'export PATH="$HOME/.local/bin:$PATH"; cd {remote_dir} && '
+                "uv run python scripts/cache_harnesses.py"
+            ),
         ]
     )
 

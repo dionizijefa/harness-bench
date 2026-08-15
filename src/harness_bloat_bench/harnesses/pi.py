@@ -1,5 +1,6 @@
 """Pi coding-agent harness with a reproducible, practical coding toolset."""
 
+import asyncio
 import logging
 import shlex
 from typing import Literal
@@ -8,6 +9,8 @@ from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import ensure_pi_cached, stage_cached_tree
 
 from ._common import (
     DEFAULT_CONTEXT_WINDOW,
@@ -35,43 +38,14 @@ def _install_script(version: str) -> str:
     return f"""\
 set -eu
 {shell_assignment("VERSION", version)}
-DIR={shlex.quote(PI_DIR)}
 BIN={shlex.quote(PI_BIN)}
 
-current="$($BIN --version 2>/dev/null || true)"
-if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ]; }}; then
-    exit 0
-fi
-
-if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get -o Acquire::Retries=3 update -qq
-        apt-get -o Acquire::Retries=3 install -y -qq curl ca-certificates tar >/dev/null
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl ca-certificates tar >/dev/null
-    else
-        echo "Pi needs curl, CA certificates, and tar" >&2
-        exit 1
-    fi
-fi
-
-case "$(uname -m)" in
-    aarch64|arm64) arch=arm64 ;;
-    x86_64|amd64) arch=x64 ;;
-    *) echo "unsupported Pi architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-mkdir -p "$DIR"
-archive="$DIR/pi-linux-$arch.tar.gz.tmp"
-stage="$DIR/stage"
-trap 'rm -f "$archive"; rm -rf "$stage"' EXIT
-curl -fsSL "https://github.com/earendil-works/pi-mono/releases/download/v$VERSION/pi-linux-$arch.tar.gz" -o "$archive"
-rm -rf "$stage"
-mkdir -p "$stage"
-tar -xzf "$archive" --strip-components=1 -C "$stage"
-rm -rf "$DIR/current"
-mv "$stage" "$DIR/current"
 chmod 755 "$BIN"
+current="$($BIN --version 2>/dev/null || true)"
+case "$current" in
+    "$VERSION"|"v$VERSION") exit 0 ;;
+    *) echo "cached Pi binary version mismatch: expected $VERSION, got $current" >&2; exit 1 ;;
+esac
 """
 
 
@@ -92,7 +66,9 @@ class PiHarness(Harness[PiHarnessConfig]):
     SUPPORTS_MCP = False
 
     async def setup(self, runtime: Runtime) -> None:
-        logger.info("pi: ensuring Pi %s is installed", self.config.version)
+        logger.info("pi: loading cached Pi %s", self.config.version)
+        cached_tree = await asyncio.to_thread(ensure_pi_cached, self.config.version)
+        await stage_cached_tree(runtime, cached_tree, f"{PI_DIR}/current")
         await run_install(
             runtime, "Pi", self.config.version, _install_script(self.config.version)
         )

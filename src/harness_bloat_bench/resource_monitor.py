@@ -5,7 +5,12 @@ import subprocess
 from pathlib import Path
 
 import verifiers.v1.runtimes as vf_runtimes
+from verifiers.v1.errors import SandboxError
+from verifiers.v1.runtimes.base import parse_gpu
 from verifiers.v1.runtimes.docker import DockerRuntime as BaseDockerRuntime
+from verifiers.v1.runtimes.docker import docker
+
+from harness_bloat_bench.harness_cache import CONTAINER_CACHE_ROOT, cache_root
 
 _last_usage: dict = {}
 _monitor_installed = False
@@ -93,6 +98,52 @@ def _capture_container_usage(container: str | None) -> dict:
 
 
 class MonitoredDockerRuntime(BaseDockerRuntime):
+    async def start(self) -> None:
+        """Start Docker with the persistent harness cache mounted read-only."""
+        try:
+            version = await docker("version", "--format", "{{.Server.Version}}")
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                "docker runtime selected but the `docker` CLI is not installed"
+            ) from error
+        if version.exit_code != 0:
+            detail = (version.stderr or version.stdout).strip()
+            raise RuntimeError(
+                f"docker runtime selected but the Docker daemon is not reachable: {detail}"
+            )
+        self._container = self.name
+        limits: list[str] = []
+        if self.config.cpu is not None:
+            limits += ["--cpus", str(self.config.cpu)]
+        if self.config.memory is not None:
+            limits += ["--memory", f"{self.config.memory}g"]
+        _, gpu_count = parse_gpu(self.config.gpu)
+        if gpu_count:
+            limits += ["--gpus", str(gpu_count)]
+        cache = cache_root()
+        cache.mkdir(parents=True, exist_ok=True)
+        run = await docker(
+            "run",
+            "--detach",
+            "--network",
+            "host",
+            *limits,
+            "--volume",
+            f"{cache}:{CONTAINER_CACHE_ROOT}:ro",
+            "--workdir",
+            self.config.workdir,
+            "--entrypoint",
+            "sleep",
+            "--name",
+            self._container,
+            self.config.image,
+            "infinity",
+        )
+        if run.exit_code != 0:
+            raise SandboxError(f"docker run failed: {run.stderr.strip()}")
+        self.info.id = run.stdout.strip()[:12]
+        self._harness_cache_mounted = True
+
     async def teardown(self) -> None:
         global _last_usage
         try:

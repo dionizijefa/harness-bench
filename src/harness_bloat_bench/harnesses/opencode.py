@@ -1,5 +1,6 @@
 """OpenCode CLI harness using an isolated OpenAI-compatible provider."""
 
+import asyncio
 import json
 import logging
 import shlex
@@ -8,6 +9,8 @@ from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import ensure_opencode_cached, stage_cached_file
 
 from ._common import (
     DEFAULT_CONTEXT_WINDOW,
@@ -41,71 +44,18 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
 def _install_script(version: str) -> str:
     version = release_version(version)
     artifact_version = OPENCODE_ARTIFACT_ALIASES.get(version, version)
-    supports_musl = _version_tuple(artifact_version) >= (1, 0, 0)
     return f"""\
 set -eu
 {shell_assignment("VERSION", version)}
 {shell_assignment("ARTIFACT_VERSION", artifact_version)}
-{shell_assignment("SUPPORTS_MUSL", "1" if supports_musl else "0")}
-DIR={shlex.quote(OPENCODE_DIR)}
 BIN={shlex.quote(OPENCODE_BIN)}
 
-current="$($BIN --version 2>/dev/null || true)"
-if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ] || [ "$current" = "$ARTIFACT_VERSION" ] || [ "$current" = "v$ARTIFACT_VERSION" ]; }}; then
-    exit 0
-fi
-
-if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get -o Acquire::Retries=3 update -qq
-        apt-get -o Acquire::Retries=3 install -y -qq curl ca-certificates tar >/dev/null
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl ca-certificates tar >/dev/null
-    else
-        echo "OpenCode needs curl, CA certificates, and tar" >&2
-        exit 1
-    fi
-fi
-
-musl=0
-for loader in /lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1; do
-    if [ -e "$loader" ]; then
-        musl=1
-        break
-    fi
-done
-if [ "$musl" = 1 ] && [ "$SUPPORTS_MUSL" = 0 ]; then
-    echo "OpenCode $VERSION has no official musl artifact" >&2
-    exit 1
-fi
-
-case "$(uname -m)" in
-    aarch64|arm64)
-        package=opencode-linux-arm64
-        [ "$musl" = 0 ] || package="$package-musl"
-        ;;
-    x86_64|amd64)
-        if [ "$ARTIFACT_VERSION" = "0.1.195" ]; then
-            package=opencode-linux-x64
-        else
-            package=opencode-linux-x64-baseline
-        fi
-        [ "$musl" = 0 ] || package="$package-musl"
-        ;;
-    *) echo "unsupported OpenCode architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-mkdir -p "$DIR/bin"
-archive="$DIR/$package.tgz.tmp"
-unpack="$DIR/unpack"
-trap 'rm -rf "$archive" "$unpack"' EXIT
-curl -fsSL "https://registry.npmjs.org/$package/-/$package-$ARTIFACT_VERSION.tgz" -o "$archive"
-rm -f "$BIN"
-rm -rf "$unpack"
-mkdir -p "$unpack"
-tar -xzf "$archive" -C "$unpack"
-mv "$unpack/package/bin/opencode" "$BIN"
 chmod 755 "$BIN"
+current="$($BIN --version 2>/dev/null || true)"
+case "$current" in
+    "$VERSION"|"v$VERSION"|"$ARTIFACT_VERSION"|"v$ARTIFACT_VERSION") exit 0 ;;
+    *) echo "cached OpenCode binary version mismatch: expected $VERSION, got $current" >&2; exit 1 ;;
+esac
 """
 
 
@@ -123,7 +73,31 @@ class OpenCodeHarness(Harness[OpenCodeHarnessConfig]):
     SUPPORTS_MCP = True
 
     async def setup(self, runtime: Runtime) -> None:
-        logger.info("opencode: ensuring OpenCode %s is installed", self.config.version)
+        logger.info("opencode: loading cached OpenCode %s", self.config.version)
+        musl_check = await runtime.run(
+            [
+                "sh",
+                "-c",
+                "for loader in /lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1; do [ ! -e \"$loader\" ] || exit 0; done; exit 1",
+            ],
+            {},
+        )
+        musl = musl_check.exit_code == 0
+        artifact_version = OPENCODE_ARTIFACT_ALIASES.get(
+            release_version(self.config.version), release_version(self.config.version)
+        )
+        if musl and _version_tuple(artifact_version) < (1, 0, 0):
+            raise RuntimeError(
+                f"OpenCode {self.config.version} has no official musl artifact"
+            )
+        cached_binary = await asyncio.to_thread(
+            ensure_opencode_cached,
+            self.config.version,
+            artifact_version,
+            None,
+            musl=musl,
+        )
+        await stage_cached_file(runtime, cached_binary, OPENCODE_BIN)
         await run_install(
             runtime,
             "OpenCode",

@@ -85,6 +85,7 @@ def main() -> None:
         timing = trace["timing"]
         row = {
             "dagster_run_id": args.run_id,
+            "batch_id": spec.get("batch_id"),
             "rollout_key": key,
             "model": spec["model"],
             "harness": spec["harness"],

@@ -1,5 +1,6 @@
 """Nous Research Hermes Agent harness."""
 
+import asyncio
 import logging
 import shlex
 from typing import Literal
@@ -8,6 +9,12 @@ from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import (
+    ensure_docker_built_tree,
+    install_cached_python_runtime_script,
+    stage_cached_tree,
+)
 
 from ._common import (
     DEFAULT_CONTEXT_WINDOW,
@@ -156,14 +163,27 @@ class HermesAgentHarness(Harness[HermesAgentHarnessConfig]):
 
     async def setup(self, runtime: Runtime) -> None:
         logger.info(
-            "hermes-agent: ensuring Hermes Agent %s is installed",
+            "hermes-agent: loading cached Hermes Agent %s",
             self.config.version,
         )
+        cached_tree = await asyncio.to_thread(
+            ensure_docker_built_tree,
+            harness="hermes-agent",
+            version=self.config.version,
+            source_dir=HERMES_DIR,
+            install_script=_install_script(self.config.version),
+        )
+        await stage_cached_tree(runtime, cached_tree, HERMES_DIR)
         await run_install(
             runtime,
             "Hermes Agent",
             self.config.version,
-            _install_script(self.config.version),
+            f"""\
+set -eu
+{install_cached_python_runtime_script(HERMES_DIR)}
+test -x {shlex.quote(HERMES_BIN)}
+{shlex.quote(HERMES_BIN)} --version >/dev/null
+""",
         )
 
     async def launch(

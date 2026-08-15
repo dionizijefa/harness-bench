@@ -1,13 +1,16 @@
 """Version-aware compatibility wrapper for Verifiers' Codex CLI harness."""
 
+import asyncio
 import shlex
 from typing import Any, cast
 
 from verifiers.v1.clients import ModelContext
 from verifiers.v1.harnesses.codex import CodexHarness, CodexHarnessConfig
-from verifiers.v1.harnesses.codex.harness import CODEX_BIN, CODEX_DIR, INSTALL
+from verifiers.v1.harnesses.codex.harness import CODEX_BIN, CODEX_DIR
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
+
+from harness_bloat_bench.harness_cache import ensure_codex_cached, stage_cached_file
 
 from ._common import release_version, run_install, shell_assignment
 
@@ -21,25 +24,19 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 
 def _install_script(version: str) -> str:
-    """Build a stock Codex install script that also verifies the pinned version."""
+    """Verify the pinned Codex binary staged from the persistent cache."""
     version = release_version(version)
     _version_tuple(version)
-    download = (
-        INSTALL.replace("{version}", version)
-        .replace("{dir}", CODEX_DIR)
-        .replace("{bin}", CODEX_BIN)
-    )
     return f"""\
 set -eu
 {shell_assignment("VERSION", version)}
 BIN={shlex.quote(CODEX_BIN)}
 
 current="$($BIN --version 2>/dev/null || true)"
-if [ -x "$BIN" ] && {{ [ "$current" = "$VERSION" ] || [ "$current" = "v$VERSION" ] || [ "$current" = "codex $VERSION" ] || [ "$current" = "codex-cli $VERSION" ]; }}; then
-    exit 0
-fi
-
-{download}
+case "$current" in
+    "$VERSION"|"v$VERSION"|"codex $VERSION"|"codex-cli $VERSION") exit 0 ;;
+    *) echo "cached Codex binary version mismatch: expected $VERSION, got $current" >&2; exit 1 ;;
+esac
 """
 
 
@@ -105,6 +102,10 @@ class CodexAgentHarness(CodexHarness):
     """Expose the stock Codex harness under the explicit ``codex_agent`` ID."""
 
     async def setup(self, runtime: Runtime) -> None:
+        cached_binary = await asyncio.to_thread(
+            ensure_codex_cached, self.config.version
+        )
+        await stage_cached_file(runtime, cached_binary, CODEX_BIN)
         script = _install_script(self.config.version)
         guarded = (
             f"mkdir -p {shlex.quote(CODEX_DIR)} && "

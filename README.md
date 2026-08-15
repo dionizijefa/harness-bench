@@ -34,6 +34,7 @@ Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the L
 ops:
   plan_rollouts:
     config:
+      batch_id: experiment-2026-08-15-a
       models: [~deepseek/deepseek-v4-flash-latest]
       harnesses:
         - id: codex_agent
@@ -73,10 +74,14 @@ separate stages. Override `rollout_timeout_seconds` for a run, or set it to
 `null` to disable the limit.
 
 Every run is automatically tagged in Dagster from its actual configuration.
+Set the optional `batch_id` to an experiment identifier shared by every
+rollout in the matrix. It is stored on every result and exposed as the
+`harness_bloat/batch_id` Dagster run tag, so the same identifier can group
+related Dagster runs. Omit it (or set it to `null`) for an unassigned batch.
 Set `run_type: test` for a real canary or smoke rollout and `run_type: full` for
 a complete benchmark; full is the default, while `dry_run: true` always implies
 test. The Runs page can filter on `harness_bloat/run_type`,
-`harness_bloat/model`, `harness_bloat/harness`,
+`harness_bloat/batch_id`, `harness_bloat/model`, `harness_bloat/harness`,
 `harness_bloat/harness_version`, and `harness_bloat/harness_matrix`. The matrix
 tag retains exact harness/version pairs, such as
 `codex_agent@0.140.0,codex_agent@0.147.0`. The companion
@@ -118,6 +123,27 @@ uv run python scripts/smoke_codex_versions.py 0.147.0
 uv run python scripts/smoke_claude_code_versions.py 2.1.226
 uv run python scripts/smoke_omp_versions.py 17.2.10
 ```
+
+Pinned harness artifacts are cached persistently under
+`.harness-cache/<harness>/linux-<arch>/<version>/`. Docker rollouts mount that
+directory read-only and symlink the selected release into the task container;
+other runtimes receive a copy. A missing version is downloaded or built once
+under a cross-process lock, and other rollouts reuse it instead of contacting
+release hosts or package registries. Hermes Agent and PrimeAgent cache their
+complete installed trees, including a portable Python runtime, so their
+dependency resolvers also run only during prefetch. Every real rollout performs
+this host-side cache preflight before its benchmark timer starts, so a cold
+cache cannot inflate one task's recorded runtime. Preload every harness version
+in the checked-in matrices ahead of a run with:
+
+```sh
+uv run python scripts/cache_harnesses.py
+```
+
+Use `--harness omp_agent` (repeatable) to preload a subset. The older
+`scripts/cache_omp_versions.py` command remains available for explicit OMP-only
+prefetching. `scripts/configure-remote` preloads the full cache on the SSH
+worker before it writes the worker configuration.
 
 Pass `--model` to override the model or list multiple versions to check them
 concurrently. The commands read `OPENROUTER_API_KEY` from the environment; use
@@ -248,11 +274,11 @@ results file is created.
 
 ## Results database
 
-The `rollout_results` table records the model, harness and exact harness
-version, dataset, task, rollout number, status, pass/fail result, reward,
-runtime, token usage, model-call count, provider-reported USD cost, trace ID,
-error details, configured container limits, cumulative container CPU time,
-peak container memory, disk I/O, peak process count, and OOM kills.
+The `rollout_results` table records the optional batch ID, model, harness and
+exact harness version, dataset, task, rollout number, status, pass/fail result,
+reward, runtime, token usage, model-call count, provider-reported USD cost,
+trace ID, error details, configured container limits, cumulative container CPU
+time, peak container memory, disk I/O, peak process count, and OOM kills.
 `resource_usage_source=cgroup_v2` identifies measurements collected from the
 remote Docker container's kernel counters. These figures are also shown in
 each mapped `run_rollout` step's output metadata in Dagster; `write_results`
@@ -265,6 +291,7 @@ Provider input-token counts include cached input. For uncached input, subtract
 
 ```sql
 SELECT
+  batch_id,
   harness,
   harness_version,
   task_id,

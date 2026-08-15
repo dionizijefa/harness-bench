@@ -49,7 +49,7 @@ set -eu
 {shell_assignment("VERSION", version)}
 BIN={shlex.quote(OMP_BIN)}
 
-chmod 755 "$BIN"
+test -x "$BIN" || chmod 755 "$BIN"
 current="$($BIN --version 2>&1 || true)"
 case "$current" in
     "$VERSION"|"v$VERSION"|"omp/$VERSION"|*" $VERSION"*) exit 0 ;;

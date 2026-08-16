@@ -106,6 +106,21 @@ def _remote_dict(remote: SSHExecutionConfig | dict | None) -> dict | None:
     return remote if isinstance(remote, dict) else remote.model_dump()
 
 
+def _validate_remote_limits(remote: SSHExecutionConfig | dict | None) -> None:
+    resolved = _remote_dict(remote)
+    if resolved is None:
+        return
+    if (
+        resolved.get("wall_timeout_seconds") is not None
+        and resolved["wall_timeout_seconds"] <= 0
+    ):
+        raise dg.Failure("remote.wall_timeout_seconds must be positive or null")
+    if resolved.get("timeout_grace_seconds", 1_800.0) <= 0:
+        raise dg.Failure("remote.timeout_grace_seconds must be positive")
+    if resolved.get("artifact_copy_timeout_seconds", 900.0) <= 0:
+        raise dg.Failure("remote.artifact_copy_timeout_seconds must be positive")
+
+
 class MatrixConfig(dg.Config):
     batch_id: str | None = None
     models: list[str] = ["~deepseek/deepseek-v4-flash-latest"]
@@ -238,16 +253,7 @@ def plan_rollouts(
         and config.rollout_timeout_seconds <= 0
     ):
         raise dg.Failure("rollout_timeout_seconds must be positive or null")
-    if config.remote is not None:
-        if (
-            config.remote.wall_timeout_seconds is not None
-            and config.remote.wall_timeout_seconds <= 0
-        ):
-            raise dg.Failure("remote.wall_timeout_seconds must be positive or null")
-        if config.remote.timeout_grace_seconds <= 0:
-            raise dg.Failure("remote.timeout_grace_seconds must be positive")
-        if config.remote.artifact_copy_timeout_seconds <= 0:
-            raise dg.Failure("remote.artifact_copy_timeout_seconds must be positive")
+    _validate_remote_limits(config.remote)
     if config.runtime == "docker":
         if config.container_cpus is not None and config.container_cpus <= 0:
             raise dg.Failure("container_cpus must be positive or null")
@@ -717,7 +723,12 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA journal_mode=WAL")
         with connection:
-            connection.executescript(
+            # Acquire the writer lock before inspecting or migrating the schema.
+            # Mapped rollouts can finish together, and a deferred transaction lets
+            # multiple processes all observe the same missing column before one of
+            # them adds it.
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS rollout_results (
                     dagster_run_id TEXT NOT NULL,
@@ -758,10 +769,12 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                     remote_output_dir TEXT,
                     row_json TEXT NOT NULL,
                     PRIMARY KEY (dagster_run_id, rollout_key)
-                );
-                CREATE INDEX IF NOT EXISTS rollout_results_lookup
-                    ON rollout_results (model, harness, task_id, status);
+                )
                 """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS rollout_results_lookup "
+                "ON rollout_results (model, harness, task_id, status)"
             )
             existing_columns = {
                 info[1]

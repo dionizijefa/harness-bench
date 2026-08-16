@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,7 @@ from harness_bloat_bench.definitions import (
     _hard_failure_row,
     _persist_rollout_row,
     _remote_dict,
+    _validate_remote_limits,
     _remote_wall_timeout_seconds,
     _ssh_command,
     _task_ids,
@@ -253,6 +255,7 @@ def test_private_remote_config_loader(monkeypatch, tmp_path: Path) -> None:
         "copy_artifacts": True,
     }
     assert _remote_dict(_configured_remote()) == _configured_remote()
+    _validate_remote_limits(_configured_remote())
 
 
 def test_provider_usage_fields_include_cost_reasoning_and_calls() -> None:
@@ -345,6 +348,46 @@ def test_existing_database_is_migrated_for_batch_ids(tmp_path: Path) -> None:
             "SELECT batch_id FROM rollout_results"
         ).fetchone()
     assert stored == ("experiment-a",)
+
+
+def test_concurrent_results_writers_serialize_schema_migrations(tmp_path: Path) -> None:
+    seed = {
+        "key": "rollout_seed",
+        "model": "model-a",
+        "harness": "codex_agent",
+        "harness_version": "0.130.0",
+        "dataset": "terminal-bench/terminal-bench-2-1",
+        "task_id": "task-a",
+        "rollout": 1,
+        "output_dir": str(tmp_path),
+    }
+    database_path = _persist_rollout_row(
+        _hard_failure_row(seed, "seed", RuntimeError("failed"), 1.0)
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX rollout_results_batch")
+        connection.execute("ALTER TABLE rollout_results DROP COLUMN batch_id")
+
+    def persist(index: int) -> None:
+        spec = {
+            **seed,
+            "key": f"rollout_{index:06d}",
+        }
+        row = _hard_failure_row(
+            spec, f"run-{index}", RuntimeError("failed"), 1.0
+        )
+        row["batch_id"] = "concurrent-migration"
+        _persist_rollout_row(row)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        list(executor.map(persist, range(6)))
+
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            "SELECT COUNT(*) FROM rollout_results "
+            "WHERE batch_id = 'concurrent-migration'"
+        ).fetchone()
+    assert stored == (6,)
 
 
 def test_eval_config_uses_v1_components(tmp_path: Path) -> None:

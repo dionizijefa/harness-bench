@@ -351,7 +351,7 @@ def ensure_docker_built_tree(
     build_script = install_script.rstrip()
     if bundle_python_runtime:
         bundled_runtime = str(PurePosixPath(source_dir) / ".python-runtime")
-        build_script += f"""
+        build_script += rf"""
 
 # Virtual environments normally point back to the build image's interpreter.
 # Bundle that interpreter and standard library so the cached tree remains
@@ -364,6 +364,24 @@ cp -a /usr/local/lib/python3.11 "$PYTHON_RUNTIME/lib/"
 for library in /usr/local/lib/libpython3.11.so*; do
     [ ! -e "$library" ] || cp -a "$library" "$PYTHON_RUNTIME/lib/"
 done
+# CPython extension modules can depend on distribution libraries that are not
+# present, or have a different SONAME, in arbitrary Terminal-Bench images.
+# Bundle those non-glibc shared objects alongside the interpreter.
+find /usr/local/lib/python3.11 -type f -name '*.so' -exec ldd {{}} \; 2>/dev/null |
+    awk '/=> \/[^ ]+/ {{ print $3 }} /^\/[[:graph:]]+ \(/ {{ print $1 }}' |
+    sort -u |
+    while IFS= read -r library; do
+        case "$(basename "$library")" in
+            ld-linux*|libc.so.*|libdl.so.*|libm.so.*|libpthread.so.*|libresolv.so.*|librt.so.*|libutil.so.*)
+                continue
+                ;;
+        esac
+        case "$library" in
+            /lib/*|/usr/lib/*)
+                cp -L "$library" "$PYTHON_RUNTIME/lib/$(basename "$library")"
+                ;;
+        esac
+    done
 """
     recipe = {
         "arch": normalized_arch,
@@ -456,15 +474,42 @@ done
             shutil.rmtree(temporary, ignore_errors=True)
 
 
-def install_cached_python_runtime_script(source_dir: str) -> str:
-    """Return an offline script that restores a composite bundle's Python."""
+def install_cached_python_runtime_script(
+    source_dir: str, dependency_dir: str
+) -> str:
+    """Return an offline script that restores a composite bundle's Python.
+
+    The cached interpreter may need older shared-library SONAMEs than the task
+    image provides. Keep those libraries private to the harness process: copying
+    them into ``/usr/local/lib`` can shadow the task image's own libraries and
+    break unrelated commands, including Harbor's verifier bootstrap.
+    """
     bundled_runtime = str(PurePosixPath(source_dir) / ".python-runtime")
     return f"""\
 PYTHON_RUNTIME={shlex.quote(bundled_runtime)}
+PYTHON_DEPENDENCY_DIR={shlex.quote(dependency_dir)}
 test -x "$PYTHON_RUNTIME/bin/python3.11"
 mkdir -p /usr/local/bin /usr/local/lib
 cp -a "$PYTHON_RUNTIME/bin/python3.11" /usr/local/bin/python3.11
-cp -a "$PYTHON_RUNTIME/lib/." /usr/local/lib/
+cp -a "$PYTHON_RUNTIME/lib/python3.11" /usr/local/lib/
+rm -rf "$PYTHON_DEPENDENCY_DIR"
+mkdir -p "$PYTHON_DEPENDENCY_DIR"
+for library in "$PYTHON_RUNTIME"/lib/*; do
+    [ -f "$library" ] || continue
+    name="$(basename "$library")"
+    if command -v ldconfig >/dev/null 2>&1 && \
+        ldconfig -p 2>/dev/null | awk '{{print $1}}' | grep -Fqx "$name"; then
+        continue
+    fi
+    found=false
+    for system_library in /lib/*/"$name" /usr/lib/*/"$name"; do
+        if [ -e "$system_library" ]; then
+            found=true
+            break
+        fi
+    done
+    [ "$found" = true ] || cp -a "$library" "$PYTHON_DEPENDENCY_DIR/$name"
+done
 """
 
 

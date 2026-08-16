@@ -50,7 +50,6 @@ set -eu
 {shell_assignment("ARTIFACT_VERSION", artifact_version)}
 BIN={shlex.quote(OPENCODE_BIN)}
 
-chmod 755 "$BIN"
 current="$($BIN --version 2>/dev/null || true)"
 case "$current" in
     "$VERSION"|"v$VERSION"|"$ARTIFACT_VERSION"|"v$ARTIFACT_VERSION") exit 0 ;;

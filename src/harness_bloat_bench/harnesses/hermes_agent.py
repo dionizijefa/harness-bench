@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 HERMES_DIR = "/tmp/vf-hermes"
 HERMES_SOURCE_DIR = f"{HERMES_DIR}/source"
 HERMES_BIN = f"{HERMES_DIR}/bin/hermes"
+HERMES_PYTHON_DEPENDENCY_DIR = "/tmp/vf-hermes-python-libs"
 ThinkingLevel = Literal[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
 ]
@@ -180,9 +181,10 @@ class HermesAgentHarness(Harness[HermesAgentHarnessConfig]):
             self.config.version,
             f"""\
 set -eu
-{install_cached_python_runtime_script(HERMES_DIR)}
+{install_cached_python_runtime_script(HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR)}
 test -x {shlex.quote(HERMES_BIN)}
-{shlex.quote(HERMES_BIN)} --version >/dev/null
+LD_LIBRARY_PATH={shlex.quote(HERMES_PYTHON_DEPENDENCY_DIR)} \
+    {shlex.quote(HERMES_BIN)} --version >/dev/null
 """,
         )
 
@@ -277,6 +279,7 @@ test -x {shlex.quote(HERMES_BIN)}
             "HERMES_HOME": state_dir,
             "HERMES_SKIP_NODE_BOOTSTRAP": "1",
             "HOME": f"{state_dir}/home",
+            "LD_LIBRARY_PATH": HERMES_PYTHON_DEPENDENCY_DIR,
             "NO_COLOR": "1",
         }
         return await runtime.run_program(argv, env)

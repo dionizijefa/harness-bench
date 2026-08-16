@@ -94,6 +94,9 @@ def test_composite_cache_reuses_matching_recipe_and_rebuilds_stale_recipe(
     assert len(commands) == first_command_count
     assert "--platform" in commands[0]
     assert "linux/amd64" in commands[0]
+    build_command = next(command for command in commands if command[1] == "exec")
+    assert "libc.so.*" in build_command[-1]
+    assert "continue" in build_command[-1]
 
     harness_cache.ensure_docker_built_tree(
         harness="composite",
@@ -163,3 +166,14 @@ def test_monitored_docker_runtime_mounts_the_host_cache_read_only(
     volume = run[run.index("--volume") + 1]
     assert volume == f"{tmp_path}:/var/cache/harness-bloat:ro"
     assert runtime._harness_cache_mounted is True
+
+
+def test_cached_python_dependencies_are_isolated_from_system_libraries() -> None:
+    script = harness_cache.install_cached_python_runtime_script(
+        "/tmp/composite", "/tmp/composite-python-libs"
+    )
+
+    assert "PYTHON_DEPENDENCY_DIR=/tmp/composite-python-libs" in script
+    assert 'cp -a "$PYTHON_RUNTIME/lib/python3.11" /usr/local/lib/' in script
+    assert 'cp -a "$PYTHON_RUNTIME/lib/." /usr/local/lib/' not in script
+    assert "ldconfig\n" not in script

@@ -40,6 +40,7 @@ PRIME_AGENT_CLI = (
     f"{PRIME_AGENT_PREFIX}/lib/node_modules/prime-agent/dist/bundle/cli.js"
 )
 PRIME_AGENT_KERNEL_VENV = f"{PRIME_AGENT_DIR}/kernel-venv"
+PRIME_AGENT_KERNEL_PYTHON = f"{PRIME_AGENT_KERNEL_VENV}/bin/python"
 ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
@@ -125,12 +126,7 @@ test -f {shlex.quote(PRIME_AGENT_CLI)}
 test -x {shlex.quote(f'{PRIME_AGENT_KERNEL_VENV}/bin/python')}
 {shlex.quote(PRIME_AGENT_NODE_BIN)} {shlex.quote(PRIME_AGENT_CLI)} --version >/dev/null
 """
-        guarded = (
-            f"mkdir -p {shlex.quote(PRIME_AGENT_DIR)} && "
-            f"flock {shlex.quote(f'{PRIME_AGENT_DIR}/install.lock')} "
-            f"sh -c {shlex.quote(script)}"
-        )
-        await run_install(runtime, "PrimeAgent", self.config.version, guarded)
+        await run_install(runtime, "PrimeAgent", self.config.version, script)
 
     async def launch(
         self,
@@ -182,6 +178,10 @@ test -x {shlex.quote(f'{PRIME_AGENT_KERNEL_VENV}/bin/python')}
             "PI_OFFLINE": "1",
             "PI_SKIP_VERSION_CHECK": "1",
             "PRIME_AGENT_CODING_AGENT_DIR": agent_dir,
+            # The composite cache already contains a validated, fully bootstrapped
+            # kernel. Point directly at it so PrimeAgent does not try to acquire a
+            # bootstrap lock or mutate the read-only cached tree at task time.
+            "PRIME_AGENT_KERNEL_PYTHON": PRIME_AGENT_KERNEL_PYTHON,
             "PRIME_AGENT_KERNEL_VENV": PRIME_AGENT_KERNEL_VENV,
         }
         return await runtime.run_program(argv, env)

@@ -29,6 +29,7 @@ from harness_bloat_bench.harnesses.codex_agent import (
 from harness_bloat_bench.harnesses.codex_agent import _versioned_argv
 from harness_bloat_bench.harnesses.hermes_agent import (
     HERMES_BIN,
+    HERMES_PYTHON_DEPENDENCY_DIR,
     HERMES_RELEASE_TAGS,
     HermesAgentHarness,
     HermesAgentHarnessConfig,
@@ -54,6 +55,7 @@ from harness_bloat_bench.harnesses.opencode import (
 )
 from harness_bloat_bench.harnesses.prime_agent import (
     PRIME_AGENT_CLI,
+    PRIME_AGENT_KERNEL_PYTHON,
     PRIME_AGENT_KERNEL_VENV,
     PRIME_AGENT_NODE_BIN,
     PrimeAgentHarness,
@@ -191,6 +193,10 @@ def test_every_harness_resolves_sets_up_and_runs(
         "github.com/can1357/oh-my-pi/releases",
     ):
         assert network_install_marker not in setup_commands
+    if harness_id in {"claude_code_agent", "opencode", "prime_agent"}:
+        assert "chmod " not in setup_commands
+    if harness_id == "prime_agent":
+        assert "flock " not in setup_commands
 
     assert rollout_trace.stop_reason == "agent_completed"
     assert runtime.commands, f"{harness_id} setup did not invoke the runtime"
@@ -324,6 +330,7 @@ def test_requested_claude_code_versions_verify_cached_binary(
     assert "claude.ai" not in script
     assert "curl" not in script
     assert version in script
+    assert "chmod " not in script
 
 
 def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
@@ -432,6 +439,7 @@ def test_prime_agent_launch_keeps_stock_rlm_surface() -> None:
         "/tmp/vf-prime-agent-state-trace-123"
     )
     assert env["PRIME_AGENT_KERNEL_VENV"] == PRIME_AGENT_KERNEL_VENV
+    assert env["PRIME_AGENT_KERNEL_PYTHON"] == PRIME_AGENT_KERNEL_PYTHON
 
 
 def test_opencode_launch_uses_isolated_config() -> None:
@@ -503,6 +511,7 @@ def test_requested_opencode_versions_verify_cached_artifacts(version: str) -> No
         assert "ARTIFACT_VERSION=0.1.195" in script
     else:
         assert f"ARTIFACT_VERSION={version}" in script
+    assert "chmod " not in script
 
 
 @pytest.mark.parametrize(
@@ -691,6 +700,7 @@ def test_hermes_launch_uses_isolated_config_and_wires_mcp() -> None:
     assert env["HERMES_HOME"] == "/tmp/vf-hermes-agent-trace-123"
     assert env["HERMES_SKIP_NODE_BOOTSTRAP"] == "1"
     assert env["HOME"] == "/tmp/vf-hermes-agent-trace-123/home"
+    assert env["LD_LIBRARY_PATH"] == HERMES_PYTHON_DEPENDENCY_DIR
     assert "session-secret" not in runtime.writes[config_path].decode()
 
 

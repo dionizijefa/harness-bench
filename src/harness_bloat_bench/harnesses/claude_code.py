@@ -38,7 +38,6 @@ def _install_script(version: str) -> str:
     binary = _claude_bin(version)
     return f"""\
 set -eu
-chmod 755 {shlex.quote(binary)}
 current="$({shlex.quote(binary)} --version 2>/dev/null || true)"
 case "$current" in
     "$VERSION"|"v$VERSION"|"$VERSION "*|*" $VERSION") exit 0 ;;

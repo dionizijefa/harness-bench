@@ -7,6 +7,7 @@
 .ruff_cache/
 .dagster/
 .harness-cache/
+.remote-jobs/
 __pycache__/
 *.py[cod]
 outputs/

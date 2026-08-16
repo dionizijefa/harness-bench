@@ -180,35 +180,55 @@ ops:
         host: terminal-bench
         project_dir: /home/REMOTE_USER/harness-bloat-bench
         timeout_grace_seconds: 1800
-        artifact_copy_timeout_seconds: 900
+        poll_interval_seconds: 15
+        reconnect_delay_seconds: 5
 ```
 
 A complete non-secret example is checked in at `configs/remote.example.yaml`.
 
-Each mapped rollout starts a remote worker through the local OpenSSH client.
-Its stdout is streamed into the local Dagster logs, and its output directory is
-copied back to the matching local `outputs/<dagster-run-id>/<rollout>/` path.
-The API key named by `api_key_var` is forwarded over the encrypted SSH stdin
-stream when it exists locally; otherwise it must already exist in the remote
-worker environment. Set `copy_artifacts: false` to keep large trace artifacts
-only on the remote host.
+Each mapped rollout submits an idempotent durable job named from its Dagster run
+ID and rollout key. The worker detaches before the submission SSH session exits,
+runs independently, and atomically persists status plus the exact final metrics
+row under `.remote-jobs/<job-id>/`. Dagster checks that status through short SSH
+connections; connection resets are retried without restarting the rollout. Once
+complete, only the metrics row is imported into local `outputs/results.sqlite`.
+Trajectories remain in the worker's matching
+`outputs/<dagster-run-id>/<rollout>/` directory by default and their remote path
+is recorded in SQLite and Dagster metadata.
 
-Remote SSH commands use batch mode, a 30-second connection timeout, and
-30-second keepalives with three missed replies allowed. This closes a half-open
-SSH transport in roughly 90 seconds instead of leaving its Dagster rollout slot
-occupied indefinitely. The remote worker is also wrapped in a host-side outer
-deadline. By default that deadline is `rollout_timeout_seconds + 1800` seconds,
-allowing 30 minutes for image setup, scoring, and cleanup around the Verifiers
-harness timeout. Set `remote.wall_timeout_seconds` for an explicit wall-clock
-limit, or adjust `remote.timeout_grace_seconds`. Artifact copying has its own
-900-second limit, configurable with
-`remote.artifact_copy_timeout_seconds`.
+The API key named by `api_key_var` is forwarded over encrypted submission stdin
+and inherited by the detached worker. It is explicitly removed from the durable
+request file. If it does not exist locally, it must already be available in the
+remote submit process's environment. Duplicate submissions with the same job ID
+reuse the existing job; a conflicting request is rejected rather than starting
+a second paid rollout.
 
-### Recovering a completed rollout after SSH loss
+Remote job-control commands use batch mode, a 30-second connection timeout, and
+30-second keepalives with three missed replies allowed. Status polling defaults
+to every 15 seconds, while failed connections retry every 5 seconds. Submission
+retries for 5 minutes by default. Configure these with
+`remote.poll_interval_seconds`, `remote.reconnect_delay_seconds`,
+`remote.ssh_command_timeout_seconds`, and `remote.submit_timeout_seconds`.
+The detached worker is still protected by a host-side outer deadline. By
+default it is `rollout_timeout_seconds + 1800` seconds, allowing 30 minutes for
+image setup, scoring, and cleanup around the Verifiers timeout. Set
+`remote.wall_timeout_seconds` for an explicit deadline.
 
-A worker can finish and write `traces.jsonl` just as its SSH route disappears.
-In that case Dagster may report a running step even though the remote worker and
-container no longer exist. First verify that the remote trace has
+Set `copy_artifacts: true` only when local trajectory copies are explicitly
+needed. This uses the legacy tar-over-SSH transfer and its
+`artifact_copy_timeout_seconds` setting; it is intentionally disabled by
+default because metrics-only collection does not require it.
+
+### Recovering a legacy completed rollout after SSH loss
+
+Transport loss during an active durable run needs no manual recovery: its
+Dagster step reconnects and imports `result.json`. If Dagster itself was stopped
+after the remote job completed, the same recovery command below imports the
+durable result row without copying its trajectory.
+
+A rollout created before durable remote jobs can finish and write `traces.jsonl`
+just as its SSH route disappears. In that case Dagster may report a running step
+even though the remote worker and container no longer exist. First verify that the remote trace has
 `is_completed: true`; never recover a partial trace. Then copy the trace and
 restore its outcome row with:
 
@@ -216,12 +236,12 @@ restore its outcome row with:
 ./scripts/recover-remote-rollout <dagster-run-id> <rollout-number> [...]
 ```
 
-The command reads the original mapped spec from local Dagster storage, copies
-the finalized remote artifacts, and upserts the recovered score, timing, token
-usage, model-call count, and cost into `outputs/results.sqlite`. Resource usage
-may be `NULL` because its cgroup summary normally travels in the lost final SSH
-message. After recovery, terminate the stale SSH client or cancel the stale
-Dagster run to release its concurrency slot. Dagster will still record the
+For durable jobs, the command reads the exact persisted result row and upserts it
+without copying artifacts. For legacy jobs, it copies the finalized trace and
+reconstructs score, timing, token usage, model-call count, and cost; resource
+usage may be `NULL` because its cgroup summary travelled in the lost final SSH
+message. After legacy recovery, terminate the stale SSH client or cancel the
+stale Dagster run to release its concurrency slot. Dagster will still record the
 transport failure, while the benchmark outcome remains preserved in the results
 database.
 

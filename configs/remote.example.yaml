@@ -15,10 +15,14 @@ ops:
       remote:
         host: terminal-bench
         project_dir: /home/REMOTE_USER/harness-bloat-bench
-        copy_artifacts: true
+        # Final metrics are imported locally; trajectories remain on the worker.
+        copy_artifacts: false
         # Outer deadline defaults to rollout_timeout_seconds + this grace period.
         timeout_grace_seconds: 1800
-        artifact_copy_timeout_seconds: 900
+        poll_interval_seconds: 15
+        reconnect_delay_seconds: 5
+        ssh_command_timeout_seconds: 60
+        submit_timeout_seconds: 300
 
 execution:
   config:

@@ -1,5 +1,5 @@
 #!/usr/bin/env -S uv run python
-"""Recover finalized remote traces whose SSH result channel was lost."""
+"""Import durable results, with trace recovery for legacy SSH rollouts."""
 
 import argparse
 import datetime as dt
@@ -11,7 +11,9 @@ from types import SimpleNamespace
 
 from harness_bloat_bench.definitions import (
     _copy_remote_artifacts,
+    _invoke_remote_job,
     _persist_rollout_row,
+    _remote_job_id,
 )
 
 
@@ -41,7 +43,7 @@ def _usage_fields(calls: list[dict]) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Copy completed remote traces and restore their result rows."
+        description="Import completed remote rollout rows into local SQLite."
     )
     parser.add_argument("run_id", help="Dagster run ID")
     parser.add_argument(
@@ -70,6 +72,28 @@ def main() -> None:
         if not remote:
             parser.error(f"{key} is not an SSH rollout")
         local_dir = Path(spec["output_dir"]) / args.run_id / key
+        job_id = _remote_job_id(args.run_id, key)
+        durable = _invoke_remote_job(remote, "status", job_id)
+        if durable.get("state") == "completed" and isinstance(
+            durable.get("row"), dict
+        ):
+            row = durable["row"]
+            remote_dir = row["output_dir"]
+            row["remote_output_dir"] = remote_dir
+            row["output_dir"] = str(local_dir)
+            database = _persist_rollout_row(row)
+            print(
+                f"Imported {key}: {row['status']} reward={row.get('reward')} "
+                f"-> {database} (trajectory remains at {remote_dir})"
+            )
+            continue
+        if durable.get("state") != "missing":
+            parser.error(
+                f"durable job {job_id} is not complete: {durable.get('state')}"
+            )
+
+        # Rollouts created before the durable job protocol have no remote job
+        # record. Preserve the trace-based recovery path for those historical runs.
         remote_dir = str(Path(spec["output_dir"]) / args.run_id / key)
         context = SimpleNamespace(
             log=SimpleNamespace(info=lambda message, *values: print(message % values))

@@ -2,7 +2,6 @@ import asyncio
 import datetime as dt
 import json
 import os
-import selectors
 import shlex
 import sqlite3
 import subprocess
@@ -42,6 +41,7 @@ DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "prime_agent": "0.7.1",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="
+REMOTE_JOB_RESULT_PREFIX = "__HARNESS_BLOAT_REMOTE_JOB__="
 RUN_TYPE_TAG = "harness_bloat/run_type"
 DRY_RUN_TAG = "harness_bloat/dry_run"
 MODEL_TAG = "harness_bloat/model"
@@ -79,10 +79,14 @@ class SSHExecutionConfig(dg.Config):
     host: str
     project_dir: str
     ssh_options: list[str] = []
-    copy_artifacts: bool = True
+    copy_artifacts: bool = False
     wall_timeout_seconds: float | None = None
     timeout_grace_seconds: float = 1_800.0
     artifact_copy_timeout_seconds: float = 900.0
+    poll_interval_seconds: float = 15.0
+    reconnect_delay_seconds: float = 5.0
+    ssh_command_timeout_seconds: float = 60.0
+    submit_timeout_seconds: float = 300.0
 
 
 def _configured_remote() -> dict | None:
@@ -119,6 +123,14 @@ def _validate_remote_limits(remote: SSHExecutionConfig | dict | None) -> None:
         raise dg.Failure("remote.timeout_grace_seconds must be positive")
     if resolved.get("artifact_copy_timeout_seconds", 900.0) <= 0:
         raise dg.Failure("remote.artifact_copy_timeout_seconds must be positive")
+    for name, default in (
+        ("poll_interval_seconds", 15.0),
+        ("reconnect_delay_seconds", 5.0),
+        ("ssh_command_timeout_seconds", 60.0),
+        ("submit_timeout_seconds", 300.0),
+    ):
+        if resolved.get(name, default) <= 0:
+            raise dg.Failure(f"remote.{name} must be positive")
 
 
 class MatrixConfig(dg.Config):
@@ -523,38 +535,6 @@ def _terminate_process(process: subprocess.Popen) -> None:
         process.wait()
 
 
-def _process_output_lines(
-    process: subprocess.Popen, timeout_seconds: float | None
-) -> Iterator[str]:
-    """Yield binary subprocess output without letting a silent pipe bypass a deadline."""
-    assert process.stdout is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = (
-        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    )
-    pending = b""
-    try:
-        while True:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError
-            events = selector.select(1.0 if remaining is None else min(1.0, remaining))
-            if not events:
-                continue
-            chunk = os.read(process.stdout.fileno(), 65_536)
-            if not chunk:
-                break
-            pending += chunk
-            while b"\n" in pending:
-                line, pending = pending.split(b"\n", 1)
-                yield line.decode(errors="replace")
-        if pending:
-            yield pending.decode(errors="replace")
-    finally:
-        selector.close()
-
-
 def _copy_remote_artifacts(
     context: dg.OpExecutionContext,
     remote: dict,
@@ -599,61 +579,195 @@ def _copy_remote_artifacts(
         )
 
 
-def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
-    remote = spec["remote"]
-    wall_timeout = _remote_wall_timeout_seconds(spec)
-    timeout_command = (
-        "exec "
-        if wall_timeout is None
-        else f"exec timeout --signal=TERM --kill-after=30s {wall_timeout}s "
-    )
-    remote_command = (
+class RemoteJobTransportError(RuntimeError):
+    """A reconnectable failure while invoking the SSH job-control protocol."""
+
+
+def _remote_job_id(dagster_run_id: str, rollout_key: str) -> str:
+    return f"{dagster_run_id}--{rollout_key}"
+
+
+def _remote_job_command(remote: dict, action: str, job_id: str) -> str:
+    return (
         'export PATH="$HOME/.local/bin:$PATH"; '
         f"cd {shlex.quote(remote['project_dir'])} && "
-        f"{timeout_command}uv run python -u -m harness_bloat_bench.remote_worker"
+        "exec uv run python -u -m harness_bloat_bench.remote_jobs "
+        f"{shlex.quote(action)} {shlex.quote(job_id)}"
     )
+
+
+def _invoke_remote_job(
+    remote: dict,
+    action: str,
+    job_id: str,
+    request: dict | None = None,
+) -> dict:
+    command = _remote_job_command(remote, action, job_id)
+    timeout_seconds = float(remote.get("ssh_command_timeout_seconds", 60.0))
+    try:
+        completed = subprocess.run(
+            _ssh_command(remote, command),
+            input=json.dumps(request) if request is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RemoteJobTransportError(
+            f"remote {action} command exceeded {timeout_seconds:g} seconds"
+        ) from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RemoteJobTransportError(
+            f"remote {action} command exited with code {completed.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    payload = None
+    for line in completed.stdout.splitlines():
+        if line.startswith(REMOTE_JOB_RESULT_PREFIX):
+            try:
+                payload = json.loads(line.removeprefix(REMOTE_JOB_RESULT_PREFIX))
+            except json.JSONDecodeError as error:
+                raise RemoteJobTransportError(
+                    f"remote {action} returned invalid job JSON"
+                ) from error
+    if not isinstance(payload, dict) or payload.get("job_id") != job_id:
+        raise RemoteJobTransportError(
+            f"remote {action} exited without returning status for {job_id}"
+        )
+    return payload
+
+
+def _remote_failure(job_id: str, payload: dict) -> dg.Failure:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error_type = error.get("type", "RemoteJobFailure")
+        message = error.get("message", "remote job failed")
+        detail = f"{error_type}: {message}"
+    else:
+        detail = str(error or "remote job failed")
+    return dg.Failure(f"durable remote job {job_id} failed: {detail}")
+
+
+def _submit_remote_job(
+    context: dg.OpExecutionContext,
+    spec: dict,
+    job_id: str,
+    request: dict,
+) -> dict:
+    remote = spec["remote"]
+    deadline = time.monotonic() + float(remote.get("submit_timeout_seconds", 300.0))
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return _invoke_remote_job(remote, "submit", job_id, request)
+        except RemoteJobTransportError as error:
+            if time.monotonic() >= deadline:
+                raise dg.Failure(
+                    f"could not submit durable remote job {job_id}: {error}"
+                ) from error
+            if attempt == 1 or attempt % 6 == 0:
+                context.log.warning(
+                    "Remote submit transport unavailable for %s (attempt %d): %s",
+                    job_id,
+                    attempt,
+                    error,
+                )
+            time.sleep(float(remote.get("reconnect_delay_seconds", 5.0)))
+
+
+def _cancel_remote_job(remote: dict, job_id: str) -> None:
+    try:
+        _invoke_remote_job(remote, "cancel", job_id)
+    except RemoteJobTransportError:
+        # The remote outer timeout remains the final safety net when cancellation
+        # cannot cross the same unavailable transport.
+        pass
+
+
+def _wait_for_remote_job(
+    context: dg.OpExecutionContext,
+    spec: dict,
+    job_id: str,
+    initial: dict,
+    started: float,
+) -> dict:
+    remote = spec["remote"]
+    wall_timeout = _remote_wall_timeout_seconds(spec)
+    deadline = started + wall_timeout if wall_timeout is not None else None
+    poll_interval = float(remote.get("poll_interval_seconds", 15.0))
+    reconnect_delay = float(remote.get("reconnect_delay_seconds", 5.0))
+    payload = initial
+    transport_failures = 0
+    while True:
+        state = payload.get("state")
+        if state == "completed":
+            row = payload.get("row")
+            if not isinstance(row, dict):
+                raise dg.Failure(
+                    f"durable remote job {job_id} completed without a result row"
+                )
+            return row
+        if state in {"failed", "cancelled"}:
+            raise _remote_failure(job_id, payload)
+        if state not in {"queued", "running"}:
+            raise dg.Failure(
+                f"durable remote job {job_id} returned unexpected state {state!r}"
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            _cancel_remote_job(remote, job_id)
+            raise dg.Failure(
+                f"durable remote job {job_id} exceeded its outer wall-clock limit "
+                f"of {wall_timeout:g} seconds"
+            )
+
+        time.sleep(poll_interval if transport_failures == 0 else reconnect_delay)
+        try:
+            payload = _invoke_remote_job(remote, "status", job_id)
+            if transport_failures:
+                context.log.info(
+                    "Reconnected to durable remote job %s after %d failed status checks",
+                    job_id,
+                    transport_failures,
+                )
+            transport_failures = 0
+        except RemoteJobTransportError as error:
+            transport_failures += 1
+            if transport_failures == 1 or transport_failures % 12 == 0:
+                context.log.warning(
+                    "Remote status transport unavailable for %s (%d consecutive): %s",
+                    job_id,
+                    transport_failures,
+                    error,
+                )
+
+
+def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
+    remote = spec["remote"]
+    job_id = _remote_job_id(context.run_id, spec["key"])
     request = {"dagster_run_id": context.run_id, "spec": spec}
     if api_key := os.environ.get(spec["api_key_var"]):
         request["api_key"] = api_key
 
-    context.log.info("Starting rollout on SSH host %s", remote["host"])
-    process = subprocess.Popen(
-        _ssh_command(remote, remote_command),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+    context.log.info(
+        "Submitting durable rollout %s on SSH host %s", job_id, remote["host"]
     )
-    row = None
+    started = time.monotonic()
+    initial = _submit_remote_job(context, spec, job_id, request)
     try:
-        assert process.stdin is not None
-        process.stdin.write(json.dumps(request).encode())
-        process.stdin.close()
-        local_timeout = wall_timeout + 120 if wall_timeout is not None else None
-        for line in _process_output_lines(process, local_timeout):
-            text = line.rstrip()
-            if text.startswith(REMOTE_RESULT_PREFIX):
-                row = json.loads(text.removeprefix(REMOTE_RESULT_PREFIX))
-            elif text:
-                context.log.info("[%s] %s", remote["host"], text)
-        return_code = process.wait(timeout=30)
-    except (TimeoutError, subprocess.TimeoutExpired) as error:
-        raise dg.Failure(
-            "remote rollout exceeded its outer wall-clock limit"
-            + (f" of {wall_timeout:g} seconds" if wall_timeout is not None else "")
-        ) from error
-    finally:
-        _terminate_process(process)
-
-    if return_code != 0:
-        raise dg.Failure(
-            f"remote rollout on {remote['host']} exited with code {return_code}"
-        )
-    if row is None:
-        raise dg.Failure("remote rollout exited without returning a result")
+        row = _wait_for_remote_job(context, spec, job_id, initial, started)
+    except BaseException:
+        # Dagster interruption is best-effort because its worker process can be
+        # killed outright. When Python does receive the interruption, propagate
+        # cancellation to the detached process group before unwinding locally.
+        _cancel_remote_job(remote, job_id)
+        raise
 
     remote_output_dir = row["output_dir"]
     local_output_dir = Path(spec["output_dir"]) / context.run_id / spec["key"]
-    if remote["copy_artifacts"] and not spec["dry_run"]:
+    if remote.get("copy_artifacts", False) and not spec["dry_run"]:
         _copy_remote_artifacts(context, remote, remote_output_dir, local_output_dir)
     row["remote_output_dir"] = remote_output_dir
     row["output_dir"] = str(local_output_dir)

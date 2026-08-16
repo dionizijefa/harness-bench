@@ -24,13 +24,18 @@ from harness_bloat_bench.definitions import (
     _eval_config,
     _execute_rollout,
     _hard_failure_row,
+    _invoke_remote_job,
     _persist_rollout_row,
     _remote_dict,
+    _remote_job_command,
+    _remote_job_id,
     _validate_remote_limits,
     _remote_wall_timeout_seconds,
     _ssh_command,
     _task_ids,
     _trace_usage_fields,
+    _wait_for_remote_job,
+    RemoteJobTransportError,
     terminal_bench_rollouts,
 )
 from harness_bloat_bench.resource_monitor import _read_cgroup_usage
@@ -155,10 +160,14 @@ def test_remote_config_uses_explicit_tasks_without_local_discovery() -> None:
         "host": "terminal-bench",
         "project_dir": "/srv/harness-bloat-bench",
         "ssh_options": [],
-        "copy_artifacts": True,
+        "copy_artifacts": False,
         "wall_timeout_seconds": None,
         "timeout_grace_seconds": 1_800.0,
         "artifact_copy_timeout_seconds": 900.0,
+        "poll_interval_seconds": 15.0,
+        "reconnect_delay_seconds": 5.0,
+        "ssh_command_timeout_seconds": 60.0,
+        "submit_timeout_seconds": 300.0,
     }
     assert validated["execution"]["multiprocess"]["max_concurrent"] == 8
 
@@ -199,6 +208,96 @@ def test_explicit_remote_wall_timeout_overrides_derived_deadline() -> None:
         )
         == 600.0
     )
+
+
+def test_remote_job_commands_use_stable_ids_and_project_directory() -> None:
+    remote = {
+        "host": "terminal-bench",
+        "project_dir": "/srv/harness bloat",
+    }
+    job_id = _remote_job_id("run-a", "rollout_000001")
+
+    assert job_id == "run-a--rollout_000001"
+    command = _remote_job_command(remote, "status", job_id)
+    assert "cd '/srv/harness bloat'" in command
+    assert command.endswith("remote_jobs status run-a--rollout_000001")
+
+
+def test_remote_job_invocation_parses_metrics_envelope(monkeypatch) -> None:
+    payload = {
+        "job_id": "run-a--rollout_000001",
+        "state": "completed",
+        "row": {"reward": 1.0},
+    }
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs["input"] == '{"hello": "world"}'
+        return SimpleNamespace(
+            returncode=0,
+            stdout="log line\n__HARNESS_BLOAT_REMOTE_JOB__="
+            + json.dumps(payload)
+            + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(definitions.subprocess, "run", fake_run)
+
+    assert _invoke_remote_job(
+        {"host": "worker", "project_dir": "/srv/project"},
+        "submit",
+        payload["job_id"],
+        {"hello": "world"},
+    ) == payload
+
+
+def test_remote_job_polling_survives_disconnect_and_imports_result(monkeypatch) -> None:
+    job_id = "run-a--rollout_000001"
+    completed = {
+        "job_id": job_id,
+        "state": "completed",
+        "row": {"status": "passed", "reward": 1.0},
+    }
+    calls = iter(
+        [
+            RemoteJobTransportError("connection reset"),
+            completed,
+        ]
+    )
+
+    def fake_invoke(*_args, **_kwargs):
+        value = next(calls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    messages: list[tuple] = []
+    context = SimpleNamespace(
+        log=SimpleNamespace(
+            warning=lambda *values: messages.append(values),
+            info=lambda *values: messages.append(values),
+        )
+    )
+    monkeypatch.setattr(definitions, "_invoke_remote_job", fake_invoke)
+    monkeypatch.setattr(definitions.time, "sleep", lambda _seconds: None)
+
+    row = _wait_for_remote_job(
+        context,
+        {
+            "remote": {
+                "poll_interval_seconds": 0.01,
+                "reconnect_delay_seconds": 0.01,
+                "wall_timeout_seconds": None,
+            },
+            "rollout_timeout_seconds": None,
+        },
+        job_id,
+        {"job_id": job_id, "state": "running"},
+        definitions.time.monotonic(),
+    )
+
+    assert row == {"status": "passed", "reward": 1.0}
+    assert any("transport unavailable" in values[0] for values in messages)
+    assert any("Reconnected" in values[0] for values in messages)
 
 
 def test_image_input_tasks_are_excluded_from_explicit_task_lists() -> None:

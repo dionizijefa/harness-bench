@@ -34,5 +34,8 @@ if [ "$port_supplied" = false ]; then
     set -- --port "${DAGSTER_UI_PORT:-3210}" "$@"
 fi
 
-uv run dagster instance concurrency set rollouts "${HARNESS_BLOAT_ROLLOUT_SLOTS:-8}"
-exec uv run dagster dev -m harness_bloat_bench.definitions "$@"
+# Invoke Dagster through Python instead of its generated console script. The
+# console script's shebang contains the absolute virtualenv path, so it stops
+# working when this repository is renamed or moved.
+uv run python -m dagster instance concurrency set rollouts "${HARNESS_BLOAT_ROLLOUT_SLOTS:-8}"
+exec uv run python -m dagster dev -m harness_bloat_bench.definitions "$@"

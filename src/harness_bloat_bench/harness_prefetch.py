@@ -11,6 +11,10 @@ from harness_bloat_bench.harness_cache import (
     ensure_omp_cached,
     ensure_opencode_cached,
 )
+from harness_bloat_bench.harnesses.deepseek_harness import (
+    DEEPSEEK_HARNESS_DIR,
+    _install_script as deepseek_harness_install_script,
+)
 from harness_bloat_bench.harnesses.hermes_agent import (
     HERMES_DIR,
     _install_script as hermes_install_script,
@@ -18,6 +22,14 @@ from harness_bloat_bench.harnesses.hermes_agent import (
 from harness_bloat_bench.harnesses.opencode import (
     OPENCODE_ARTIFACT_ALIASES,
     _version_tuple as opencode_version_tuple,
+)
+from harness_bloat_bench.harnesses.pi_agent import (
+    PI_AGENT_DIR,
+    _install_script as pi_agent_install_script,
+)
+from harness_bloat_bench.harnesses.pi_rlm_runtime import (
+    PI_RLM_RUNTIME_DIR,
+    _install_script as pi_rlm_runtime_install_script,
 )
 from harness_bloat_bench.harnesses.prime_agent import (
     PRIME_AGENT_DIR,
@@ -33,6 +45,17 @@ def ensure_harness_cached(
         return (ensure_claude_cached(version, arch),)
     if harness == "codex_agent":
         return (ensure_codex_cached(version, arch),)
+    if harness == "deepseek_harness":
+        return (
+            ensure_docker_built_tree(
+                harness="deepseek-harness",
+                version=version,
+                source_dir=DEEPSEEK_HARNESS_DIR,
+                install_script=deepseek_harness_install_script(version),
+                arch=arch,
+                bundle_python_runtime=False,
+            ),
+        )
     if harness == "hermes_agent":
         return (
             ensure_docker_built_tree(
@@ -55,6 +78,27 @@ def ensure_harness_cached(
                 ensure_opencode_cached(version, artifact_version, arch, musl=True)
             )
         return tuple(paths)
+    if harness == "pi_agent":
+        return (
+            ensure_docker_built_tree(
+                harness="pi-agent",
+                version=version,
+                source_dir=PI_AGENT_DIR,
+                install_script=pi_agent_install_script(version),
+                arch=arch,
+                bundle_python_runtime=False,
+            ),
+        )
+    if harness == "pi_rlm_runtime":
+        return (
+            ensure_docker_built_tree(
+                harness="pi-rlm-runtime",
+                version=version,
+                source_dir=PI_RLM_RUNTIME_DIR,
+                install_script=pi_rlm_runtime_install_script(version),
+                arch=arch,
+            ),
+        )
     if harness == "prime_agent":
         return (
             ensure_docker_built_tree(

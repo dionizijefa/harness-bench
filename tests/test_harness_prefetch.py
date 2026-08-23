@@ -10,8 +10,11 @@ from harness_bloat_bench import harness_prefetch
     [
         ("claude_code_agent", "ensure_claude_cached"),
         ("codex_agent", "ensure_codex_cached"),
+        ("deepseek_harness", "ensure_docker_built_tree"),
         ("hermes_agent", "ensure_docker_built_tree"),
         ("omp_agent", "ensure_omp_cached"),
+        ("pi_agent", "ensure_docker_built_tree"),
+        ("pi_rlm_runtime", "ensure_docker_built_tree"),
         ("prime_agent", "ensure_docker_built_tree"),
     ],
 )

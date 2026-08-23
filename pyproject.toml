@@ -29,8 +29,11 @@ packages = [
     "src/harness_bloat_bench",
     "src/codex_agent",
     "src/claude_code_agent",
+    "src/deepseek_harness",
     "src/hermes_agent",
     "src/opencode",
     "src/omp_agent",
+    "src/pi_agent",
+    "src/pi_rlm_runtime",
     "src/prime_agent",
 ]

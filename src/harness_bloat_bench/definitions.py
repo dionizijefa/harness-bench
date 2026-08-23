@@ -28,9 +28,12 @@ from harness_bloat_bench.resource_monitor import (
 HarnessId = Literal[
     "codex_agent",
     "claude_code_agent",
+    "deepseek_harness",
     "hermes_agent",
     "opencode",
     "omp_agent",
+    "pi_agent",
+    "pi_rlm_runtime",
     "prime_agent",
 ]
 
@@ -48,9 +51,12 @@ class ReasoningEffort(str, Enum):
 DEFAULT_HARNESS_VERSIONS: dict[HarnessId, str] = {
     "codex_agent": "0.137.0",
     "claude_code_agent": "2.1.226",
+    "deepseek_harness": "0.1.1-rc.2",
     "hermes_agent": "0.20.0",
     "opencode": "1.18.1",
     "omp_agent": "17.2.10",
+    "pi_agent": "0.84.2",
+    "pi_rlm_runtime": "0.1.1",
     "prime_agent": "0.7.1",
 }
 REMOTE_RESULT_PREFIX = "__HARNESS_BLOAT_RESULT__="

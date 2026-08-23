@@ -18,8 +18,21 @@ def test_versioned_harnesses_share_the_hello_world_smoke_setup(
         tmp_path / "claude",
     )
     omp = eval_config("omp_agent", "17.2.10", DEFAULT_MODEL, tmp_path / "omp")
+    deepseek = eval_config(
+        "deepseek_harness",
+        "0.1.1-rc.2",
+        DEFAULT_MODEL,
+        tmp_path / "deepseek",
+    )
+    pi = eval_config("pi_agent", "0.84.2", DEFAULT_MODEL, tmp_path / "pi")
+    pi_rlm = eval_config(
+        "pi_rlm_runtime",
+        "0.1.1",
+        DEFAULT_MODEL,
+        tmp_path / "pi-rlm",
+    )
 
-    configs = [codex, claude, omp]
+    configs = [codex, claude, omp, deepseek, pi, pi_rlm]
     assert {config.model for config in configs} == {
         "deepseek/deepseek-v4-flash-0731"
     }
@@ -34,6 +47,9 @@ def test_versioned_harnesses_share_the_hello_world_smoke_setup(
     assert codex.harness.id == "codex_agent"
     assert claude.harness.id == "claude_code_agent"
     assert omp.harness.id == "omp_agent"
+    assert deepseek.harness.id == "deepseek_harness"
+    assert pi.harness.id == "pi_agent"
+    assert pi_rlm.harness.id == "pi_rlm_runtime"
     assert all(
         config.harness.runtime.model_dump() == codex.harness.runtime.model_dump()
         for config in configs

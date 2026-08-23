@@ -16,9 +16,12 @@ from harness_bloat_bench.harness_prefetch import ensure_harness_cached
 HARNESSES = (
     "claude_code_agent",
     "codex_agent",
+    "deepseek_harness",
     "hermes_agent",
     "omp_agent",
     "opencode",
+    "pi_agent",
+    "pi_rlm_runtime",
     "prime_agent",
 )
 

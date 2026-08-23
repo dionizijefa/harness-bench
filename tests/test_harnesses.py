@@ -27,6 +27,15 @@ from harness_bloat_bench.harnesses.codex_agent import (
 from harness_bloat_bench.harnesses.codex_agent import (
     _install_script as codex_install_script,
 )
+from harness_bloat_bench.harnesses.deepseek_harness import (
+    DEEPSEEK_HARNESS_CLI,
+    DEEPSEEK_HARNESS_NODE_BIN,
+    DeepSeekHarness,
+    DeepSeekHarnessConfig,
+)
+from harness_bloat_bench.harnesses.deepseek_harness import (
+    _install_script as deepseek_harness_install_script,
+)
 from harness_bloat_bench.harnesses.hermes_agent import (
     HERMES_BIN,
     HERMES_PYTHON_DEPENDENCY_DIR,
@@ -52,6 +61,28 @@ from harness_bloat_bench.harnesses.opencode import (
 )
 from harness_bloat_bench.harnesses.opencode import (
     _install_script as opencode_install_script,
+)
+from harness_bloat_bench.harnesses.pi_agent import (
+    PI_AGENT_CLI,
+    PI_AGENT_NODE_BIN,
+    PiAgentHarness,
+    PiAgentHarnessConfig,
+)
+from harness_bloat_bench.harnesses.pi_agent import (
+    _install_script as pi_agent_install_script,
+)
+from harness_bloat_bench.harnesses.pi_rlm_runtime import (
+    PI_RLM_RUNTIME_EXTENSION,
+    PI_RLM_RUNTIME_KERNEL_PYTHON,
+    PI_RLM_RUNTIME_NODE_BIN,
+    PI_RLM_RUNTIME_PI_CLI,
+    PI_RLM_RUNTIME_PI_VERSION,
+    PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR,
+    PiRlmRuntimeHarness,
+    PiRlmRuntimeHarnessConfig,
+)
+from harness_bloat_bench.harnesses.pi_rlm_runtime import (
+    _install_script as pi_rlm_runtime_install_script,
 )
 from harness_bloat_bench.harnesses.prime_agent import (
     PRIME_AGENT_CLI,
@@ -112,9 +143,12 @@ def test_every_declared_harness_has_a_default_version() -> None:
     expected = {
         "codex_agent",
         "claude_code_agent",
+        "deepseek_harness",
         "hermes_agent",
         "opencode",
         "omp_agent",
+        "pi_agent",
+        "pi_rlm_runtime",
         "prime_agent",
     }
     assert set(get_args(HarnessId)) == expected
@@ -147,6 +181,10 @@ def test_every_harness_resolves_sets_up_and_runs(
             "harness_bloat_bench.harnesses.codex_agent.ensure_codex_cached",
             cached_file,
         ),
+        "deepseek_harness": (
+            "harness_bloat_bench.harnesses.deepseek_harness.ensure_docker_built_tree",
+            cached_tree,
+        ),
         "hermes_agent": (
             "harness_bloat_bench.harnesses.hermes_agent.ensure_docker_built_tree",
             cached_tree,
@@ -158,6 +196,14 @@ def test_every_harness_resolves_sets_up_and_runs(
         "opencode": (
             "harness_bloat_bench.harnesses.opencode.ensure_opencode_cached",
             cached_file,
+        ),
+        "pi_agent": (
+            "harness_bloat_bench.harnesses.pi_agent.ensure_docker_built_tree",
+            cached_tree,
+        ),
+        "pi_rlm_runtime": (
+            "harness_bloat_bench.harnesses.pi_rlm_runtime.ensure_docker_built_tree",
+            cached_tree,
         ),
         "prime_agent": (
             "harness_bloat_bench.harnesses.prime_agent.ensure_docker_built_tree",
@@ -350,6 +396,176 @@ def test_claude_code_routes_deepseek_through_anthropic_interception() -> None:
     }
     assert ctx.client.base_url == "https://openrouter.ai/api"
     assert ctx.client.headers["Authorization"] == "Bearer openrouter-secret"
+
+
+def test_deepseek_harness_uses_headless_profile_and_interception_patch() -> None:
+    runtime = FakeRuntime()
+    harness = DeepSeekHarness(DeepSeekHarnessConfig(id="deepseek_harness"))
+
+    asyncio.run(
+        harness.launch(
+            context(),
+            trace(),
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            {"task-tools": "http://127.0.0.1:9001/mcp"},
+        )
+    )
+
+    assert runtime.program is not None
+    argv, env = runtime.program
+    patch_path = (
+        "/tmp/vf-deepseek-harness-state-trace-123/verifiers.patch.json"
+    )
+    patches = json.loads(runtime.writes[patch_path])
+    provider = next(entry for entry in patches if entry.get("id") == "llm-pi-ai")[
+        "config"
+    ]["providers"]["verifiers"]
+    selected = next(
+        entry for entry in patches if entry.get("id") == "agent-default-model"
+    )
+    prompt = next(entry for entry in patches if entry.get("id") == "system-prompt")
+    inserted = next(entry for entry in patches if "insert" in entry)["insert"]
+
+    assert argv[:2] == [DEEPSEEK_HARNESS_NODE_BIN, DEEPSEEK_HARNESS_CLI]
+    assert argv[2:6] == ["--profile", "headless", "--patch", patch_path]
+    assert argv[-1] == "Fix the tests"
+    assert provider == {
+        "api": "openai-completions",
+        "apiKeyEnv": "VF_INTERCEPT_KEY",
+        "baseURL": "http://127.0.0.1:9000/v1",
+        "compat": {
+            "maxTokensField": "max_tokens",
+            "supportsDeveloperRole": False,
+        },
+        "models": [{"id": "model"}],
+    }
+    assert selected["config"] == {"provider": "verifiers", "model": "model"}
+    assert prompt["config"]["persona"].endswith("Be precise")
+    assert inserted == [
+        {
+            "id": "verifiers-mcp-1",
+            "name": "@deepseek-ai/dsh-mcp-client",
+            "config": {
+                "serverName": "task-tools",
+                "transport": "streamable-http",
+                "url": "http://127.0.0.1:9001/mcp",
+                "failOnStartupError": True,
+            },
+        }
+    ]
+    assert env["VF_INTERCEPT_KEY"] == "session-secret"
+    assert env["DSH_PERMISSION_MODE"] == "danger-full-access"
+    assert env["DSH_TELEMETRY_DISABLED"] == "1"
+    assert env["DSH_HOME"] == env["HOME"]
+    assert b"session-secret" not in runtime.writes[patch_path]
+
+
+def test_deepseek_harness_install_is_pinned_to_latest_package() -> None:
+    script = deepseek_harness_install_script("0.1.1-rc.2")
+
+    assert "VERSION=0.1.1-rc.2" in script
+    assert "@deepseek-ai/dsh@0.1.1-rc.2" in script
+    assert "nodejs.org/dist/v$NODE_VERSION" in script
+    assert 'PATH="$NODE_DIR/bin:$PATH"' in script
+
+
+def test_pi_launch_uses_print_mode_and_isolated_model_registry() -> None:
+    runtime = FakeRuntime()
+    harness = PiAgentHarness(
+        PiAgentHarnessConfig(id="pi_agent", disabled_tools=["write", "edit"])
+    )
+
+    asyncio.run(
+        harness.launch(
+            context(),
+            trace(),
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            {},
+        )
+    )
+
+    assert runtime.program is not None
+    argv, env = runtime.program
+    models_path = "/tmp/vf-pi-agent-state-trace-123/agent/models.json"
+    provider = json.loads(runtime.writes[models_path])["providers"]["verifiers"]
+    assert argv[:2] == [PI_AGENT_NODE_BIN, PI_AGENT_CLI]
+    assert argv[argv.index("--provider") + 1] == "verifiers"
+    assert argv[argv.index("--model") + 1] == "model"
+    assert argv[argv.index("--exclude-tools") + 1] == "write,edit"
+    assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
+    assert {"--no-session", "--no-approve", "--offline"}.issubset(argv)
+    assert argv[-3:] == ["--print", "--", "Fix the tests"]
+    assert provider == {
+        "api": "openai-completions",
+        "apiKey": "$VF_INTERCEPT_KEY",
+        "baseUrl": "http://127.0.0.1:9000/v1",
+        "models": [{"id": "model"}],
+    }
+    assert env["VF_INTERCEPT_KEY"] == "session-secret"
+    assert env["PI_CODING_AGENT_DIR"].endswith("/agent")
+    assert env["PI_OFFLINE"] == "1"
+    assert env["PI_TELEMETRY"] == "0"
+    assert b"session-secret" not in runtime.writes[models_path]
+    assert "session-secret" not in argv
+
+
+def test_pi_install_is_pinned_to_latest_package() -> None:
+    script = pi_agent_install_script("0.84.2")
+
+    assert "VERSION=0.84.2" in script
+    assert "@earendil-works/pi-coding-agent@0.84.2" in script
+    assert "--ignore-scripts" in script
+    assert "nodejs.org/dist/v$NODE_VERSION" in script
+
+
+def test_pi_rlm_runtime_launch_enables_extension_and_prebuilt_kernel() -> None:
+    runtime = FakeRuntime()
+    harness = PiRlmRuntimeHarness(
+        PiRlmRuntimeHarnessConfig(id="pi_rlm_runtime")
+    )
+
+    asyncio.run(
+        harness.launch(
+            context(),
+            trace(),
+            runtime,
+            "http://127.0.0.1:9000/v1",
+            "session-secret",
+            {},
+        )
+    )
+
+    assert runtime.program is not None
+    argv, env = runtime.program
+    models_path = "/tmp/vf-pi-rlm-runtime-state-trace-123/agent/models.json"
+    provider = json.loads(runtime.writes[models_path])["providers"]["verifiers"]
+    assert argv[:2] == [PI_RLM_RUNTIME_NODE_BIN, PI_RLM_RUNTIME_PI_CLI]
+    assert argv[argv.index("--extension") + 1] == PI_RLM_RUNTIME_EXTENSION
+    assert "--rlm-runtime" in argv
+    assert argv[argv.index("--rlm-runtime-max-depth") + 1] == "4"
+    assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
+    assert argv[-3:] == ["--print", "--", "Fix the tests"]
+    assert provider["apiKey"] == "$VF_INTERCEPT_KEY"
+    assert env["PI_RLM_RUNTIME_PYTHON"] == PI_RLM_RUNTIME_KERNEL_PYTHON
+    assert env["LD_LIBRARY_PATH"] == PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR
+    assert env["VF_INTERCEPT_KEY"] == "session-secret"
+    assert b"session-secret" not in runtime.writes[models_path]
+    assert "session-secret" not in argv
+
+
+def test_pi_rlm_runtime_install_pins_pi_extension_and_kernel() -> None:
+    script = pi_rlm_runtime_install_script("0.1.1")
+
+    assert "VERSION=0.1.1" in script
+    assert f"PI_VERSION={PI_RLM_RUNTIME_PI_VERSION}" in script
+    assert f"@earendil-works/pi-coding-agent@{PI_RLM_RUNTIME_PI_VERSION}" in script
+    assert "pi-rlm-runtime@0.1.1" in script
+    assert "ipykernel==7.2.0" in script
+    assert "python3.11 -m venv" in script
 
 
 PRIME_AGENT_HISTORY_VERSIONS = [

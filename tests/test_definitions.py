@@ -675,9 +675,12 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
                         "harnesses": [
                             {"id": "codex_agent"},
                             {"id": "claude_code_agent"},
+                            {"id": "deepseek_harness"},
                             {"id": "hermes_agent"},
                             {"id": "opencode"},
                             {"id": "omp_agent"},
+                            {"id": "pi_agent"},
+                            {"id": "pi_rlm_runtime"},
                             {"id": "prime_agent"},
                         ],
                         "task_ids": ["task-a"],
@@ -700,8 +703,11 @@ def test_dry_run_expands_harness_defaults(tmp_path: Path) -> None:
     assert harnesses == {
         ("codex_agent", "0.137.0"),
         ("claude_code_agent", "2.1.226"),
+        ("deepseek_harness", "0.1.1-rc.2"),
         ("hermes_agent", "0.20.0"),
         ("opencode", "1.18.1"),
         ("omp_agent", "17.2.10"),
+        ("pi_agent", "0.84.2"),
+        ("pi_rlm_runtime", "0.1.1"),
         ("prime_agent", "0.7.1"),
     }

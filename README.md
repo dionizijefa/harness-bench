@@ -1,8 +1,10 @@
-# harness-bloat-bench
+# Harness Bench
 
 Terminal-Bench 2.1 rollouts using [Prime Intellect Verifiers v1](https://github.com/PrimeIntellect-ai/verifiers) with Dagster as the control plane.
 
-Each dynamically mapped `run_rollout` step is exactly one Verifiers rollout. Verifiers supplies the Harbor taskset, selected coding harness, Docker/Prime runtime, scoring, retry policy, and trace format; Dagster supplies scheduling, concurrency, re-execution, logs, and observability.
+Each dynamically mapped `run_rollout` step is exactly one Verifiers rollout.
+
+# WARNING HUMANS: README FOR LLMs below
 
 ## Run
 
@@ -97,34 +99,12 @@ Set `reasoning_effort` to `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 or `max` to apply that effort to every model call in the run. Omit it or set it
 to `null` to use each model's provider default. The declared value is retained
 in the rollout spec, Dagster run tag and output metadata, trace sampling config,
-and the SQLite result row. Historical and model-default runs remain `NULL` in
-the database rather than being assigned a guessed effort.
+and the SQLite result row. 
 
 `harnesses` pairs a harness ID with an optional version. Omitted versions use reproducible defaults: Codex Agent `0.137.0`, Claude Code `2.1.226`, Hermes Agent `0.20.0`, OpenCode `1.18.1`, OMP `17.2.10`, and PrimeAgent `0.7.1`. Pin a different release with, for example, `{id: opencode, version: 1.17.0}`. Codex Agent's single supported ID is `codex_agent`; the old `harness_versions` list remains accepted for Codex Agent-only configs.
 
-`configs/opencode-versions.yaml` is a ready-to-run matrix spanning the selected
-OpenCode `0.1.x` through `1.18.x` releases. OpenCode `0.1.196` has no published
-binary; its upstream tag points at the same commit as `0.1.195`, so the adapter
-uses the official `0.1.195` artifact for that one matrix label.
-
-`configs/hermes-agent-versions.yaml` is the corresponding Hermes Agent history
-matrix for the selected `0.2.0` through `0.20.0` releases. Hermes uses calendar
-Git tags for these product versions; the adapter resolves each matrix label to
-its exact upstream tag and selects the compatible installer and CLI surface.
-
-`configs/codex-agent-versions.yaml` and `configs/omp-agent-versions.yaml` add
-ready-to-run history matrices for the selected Codex Agent `0.78.0` through
-`0.147.0` releases and OMP `11.3.0` through `17.2.10` releases. Their adapters
-select the CLI flags and configuration shapes supported by each pinned release.
-
-`configs/prime-agent-versions.yaml` covers the modern PrimeAgent lineage from
-`0.2.6` through `0.7.1`, and `configs/claude-code-versions.yaml` samples Claude
-Code's `2.1.97` through `2.1.226` release history. Claude Code sends Anthropic
-Messages requests to Verifiers interception while mapping its primary, alias,
-and subagent model settings to the selected matrix model (DeepSeek by default).
-Its local plugin ID is `claude_code_agent` because Verifiers reserves
-`claude_code` for its built-in adapter, mirroring this project's existing
-`codex_agent` naming.
+`configs/<harness>-versions.yaml` is a ready-to-run matrix spanning the selected
+releases. OpenCode `0.1.196` has no published
 
 Before launching a full version matrix, run the matching Harbor `hello-world`
 smoke check. Both commands use the same Docker limits, timeouts, pass criteria,
@@ -160,8 +140,6 @@ worker before it writes the worker configuration.
 Pass `--model` to override the model or list multiple versions to check them
 concurrently. The commands read `OPENROUTER_API_KEY` from the environment; use
 `--api-key-stdin` when invoking them through SSH without persisting the key.
-
-The adapters install the official Linux releases inside each rollout sandbox and route model calls through Verifiers interception. Codex Agent layers historical-version compatibility over Verifiers' stock Codex CLI adapter. Claude Code uses its stock headless coding surface and Anthropic Messages protocol, including remote task MCP servers. Hermes Agent runs its headless chat surface with isolated state, coding tools, task system prompts, and remote task MCP servers. OpenCode and OMP retain their stock coding-agent surfaces and also support task MCP servers. PrimeAgent retains its stock IPython/RLM tool surface with an isolated custom model registry and shared prepared kernel runtime. See the upstream [Codex CLI](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenCode CLI](https://opencode.ai/docs/cli/), [OMP repository](https://github.com/can1357/oh-my-pi), and [PrimeAgent repository](https://github.com/PrimeIntellect-ai/prime-agent) for the underlying behavior.
 
 The default endpoint is OpenRouter. `base_url` and `api_key_var` are regular matrix config fields if another OpenAI-compatible endpoint is needed. Set `runtime: prime` to use Prime Sandboxes instead of local Docker.
 
@@ -353,28 +331,3 @@ SELECT
 FROM rollout_results
 ORDER BY timestamp, harness, task_id, rollout;
 ```
-
-### Plot OpenCode history
-
-Generate the task outcome matrix, per-task token trends, version-level token
-variance, mean token/cost history, and successful-task cost/budget plots from
-the cross-run database:
-
-```sh
-uv run python scripts/plot_opencode_results.py
-```
-
-The command writes PNG plots plus `all_version_successful_spend.csv`,
-`version_variance.csv`, `mean_tokens_and_cost_by_version.csv`, and `summary.json`
-beneath `outputs/plots/opencode/`.
-A task counts as successful in all versions only when it is present in every
-selected version and every recorded rollout passed. Repeated rollouts are
-represented by their median usage. The budget plot compares output tokens with
-the cumulative configured generation allowance (`model_call_count ×` the
-per-call harness `max_tokens`); total tokens also include input and cached input.
-Version-variance comparisons use only tasks present in every selected version,
-so missing task/version pairs cannot skew the historical comparison.
-
-Use `--model` or `--dataset` when the database contains more than one value for
-the selected harness, and `--output-dir` to place the generated artifacts
-elsewhere.

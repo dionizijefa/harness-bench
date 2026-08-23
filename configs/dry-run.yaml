@@ -6,9 +6,12 @@ ops:
       harnesses:
         - id: codex_agent
         - id: claude_code_agent
+        - id: deepseek_harness
         - id: hermes_agent
         - id: opencode
         - id: omp_agent
+        - id: pi_agent
+        - id: pi_rlm_runtime
         - id: prime_agent
       task_ids: [crack-7z-hash]
       num_rollouts: 2

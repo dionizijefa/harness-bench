@@ -1,0 +1,23 @@
+ops:
+  plan_rollouts:
+    config:
+      reasoning_effort: high
+      harnesses:
+        - {id: omp_agent, version: 11.3.0}
+        - {id: omp_agent, version: 11.13.1}
+        - {id: omp_agent, version: 12.6.0}
+        - {id: omp_agent, version: 12.16.0}
+        - {id: omp_agent, version: 13.6.2}
+        - {id: omp_agent, version: 13.14.2}
+        - {id: omp_agent, version: 14.4.4}
+        - {id: omp_agent, version: 15.4.3}
+        - {id: omp_agent, version: 15.12.4}
+        - {id: omp_agent, version: 17.2.10}
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      container_cpus: 8
+      container_memory_gb: 18
+
+execution:
+  config:
+    max_concurrent: 8

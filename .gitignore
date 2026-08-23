@@ -1,0 +1,14 @@
+.DS_Store
+.venv
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.dagster/
+.harness-cache/
+.remote-jobs/
+__pycache__/
+*.py[cod]
+outputs/
+push.log

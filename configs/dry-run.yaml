@@ -1,0 +1,21 @@
+ops:
+  plan_rollouts:
+    config:
+      models: [dry-run-model]
+      reasoning_effort: high
+      harnesses:
+        - id: codex_agent
+        - id: claude_code_agent
+        - id: hermes_agent
+        - id: opencode
+        - id: omp_agent
+        - id: prime_agent
+      task_ids: [crack-7z-hash]
+      num_rollouts: 2
+      output_dir: outputs/dry-run
+      run_type: test
+      dry_run: true
+
+execution:
+  config:
+    max_concurrent: 2

@@ -1,0 +1,23 @@
+ops:
+  plan_rollouts:
+    config:
+      reasoning_effort: high
+      harnesses:
+        - {id: hermes_agent, version: 0.2.0}
+        - {id: hermes_agent, version: 0.4.0}
+        - {id: hermes_agent, version: 0.6.0}
+        - {id: hermes_agent, version: 0.8.0}
+        - {id: hermes_agent, version: 0.10.0}
+        - {id: hermes_agent, version: 0.12.0}
+        - {id: hermes_agent, version: 0.14.0}
+        - {id: hermes_agent, version: 0.16.0}
+        - {id: hermes_agent, version: 0.18.2}
+        - {id: hermes_agent, version: 0.20.0}
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      container_cpus: 8
+      container_memory_gb: 18
+
+execution:
+  config:
+    max_concurrent: 8

@@ -1,0 +1,30 @@
+ops:
+  plan_rollouts:
+    config:
+      reasoning_effort: high
+      harnesses:
+        - id: codex_agent
+        - id: claude_code_agent
+        - id: hermes_agent
+        - id: opencode
+        - id: omp_agent
+        - id: prime_agent
+      task_ids: [adaptive-rejection-sampler]
+      num_rollouts: 1
+      container_cpus: 8
+      container_memory_gb: 18
+      remote:
+        host: terminal-bench
+        project_dir: /home/REMOTE_USER/harness-bloat-bench
+        # Final metrics are imported locally; trajectories remain on the worker.
+        copy_artifacts: false
+        # Outer deadline defaults to rollout_timeout_seconds + this grace period.
+        timeout_grace_seconds: 1800
+        poll_interval_seconds: 15
+        reconnect_delay_seconds: 5
+        ssh_command_timeout_seconds: 60
+        submit_timeout_seconds: 300
+
+execution:
+  config:
+    max_concurrent: 8

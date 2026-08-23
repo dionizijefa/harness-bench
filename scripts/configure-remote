@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Configure and bootstrap the private SSH rollout worker."""
+
+import argparse
+import json
+import shlex
+import subprocess
+from pathlib import Path
+
+
+def run(command: list[str]) -> None:
+    subprocess.run(command, check=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Configure an SSH host as the default Dagster rollout worker."
+    )
+    parser.add_argument("host", help="Host or alias accepted by the local ssh command")
+    parser.add_argument(
+        "project_dir",
+        nargs="?",
+        help="Absolute project directory (default: ~/harness-bloat-bench on worker)",
+    )
+    args = parser.parse_args()
+
+    if args.host.startswith("-") or any(char.isspace() for char in args.host):
+        parser.error("host cannot start with '-' or contain whitespace")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    private_dir = repo_root / ".dagster"
+    private_dir.mkdir(exist_ok=True)
+
+    print(f"Checking SSH connection to {args.host}...")
+    run(["ssh", "--", args.host, "true"])
+
+    project_dir = args.project_dir
+    if project_dir is None:
+        remote_home = subprocess.check_output(
+            ["ssh", "--", args.host, 'printf "%s" "$HOME"'],
+            text=True,
+        ).strip()
+        project_dir = f"{remote_home}/harness-bloat-bench"
+    if not project_dir.startswith("/") or any(char.isspace() for char in project_dir):
+        parser.error("project_dir must be an absolute path without whitespace")
+
+    remote_dir = shlex.quote(project_dir)
+    run(["ssh", "--", args.host, f"mkdir -p -- {remote_dir}"])
+
+    print(f"Syncing project to {args.host}:{project_dir}...")
+    run(
+        [
+            "rsync",
+            "-az",
+            "--exclude",
+            ".git",
+            "--exclude",
+            ".venv",
+            "--exclude",
+            ".dagster",
+            "--exclude",
+            ".env*",
+            "--exclude",
+            ".harness-cache",
+            "--exclude",
+            ".remote-jobs",
+            "--exclude",
+            "outputs",
+            f"{repo_root}/",
+            f"{args.host}:{project_dir.rstrip('/')}/",
+        ]
+    )
+
+    print("Installing the remote environment...")
+    run(
+        [
+            "ssh",
+            "--",
+            args.host,
+            f'export PATH="$HOME/.local/bin:$PATH"; cd {remote_dir} && uv sync',
+        ]
+    )
+
+    print("Caching configured harness releases on the remote worker...")
+    run(
+        [
+            "ssh",
+            "--",
+            args.host,
+            (
+                f'export PATH="$HOME/.local/bin:$PATH"; cd {remote_dir} && '
+                "uv run python scripts/cache_harnesses.py"
+            ),
+        ]
+    )
+
+    config_path = private_dir / "remote.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "host": args.host,
+                "project_dir": project_dir,
+                "ssh_options": [],
+                "copy_artifacts": False,
+                "wall_timeout_seconds": None,
+                "timeout_grace_seconds": 1_800.0,
+                "artifact_copy_timeout_seconds": 900.0,
+                "poll_interval_seconds": 15.0,
+                "reconnect_delay_seconds": 5.0,
+                "ssh_command_timeout_seconds": 60.0,
+                "submit_timeout_seconds": 300.0,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"Configured private worker settings in {config_path}")
+    print("Restart ./scripts/dagster-ui, then click Launch Run in Dagster.")
+
+
+if __name__ == "__main__":
+    main()

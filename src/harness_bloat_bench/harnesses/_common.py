@@ -3,6 +3,8 @@ import shlex
 
 from verifiers.v1.runtimes import Runtime
 
+from harness_bloat_bench.harness_cache import linux_arch
+
 INTERCEPT_PROVIDER = "verifiers"
 INTERCEPT_MODEL = "model"
 INTERCEPT_KEY_VAR = "VF_INTERCEPT_KEY"
@@ -13,6 +15,24 @@ NODE_VERSION = "22.23.2"
 def release_version(version: str) -> str:
     """Normalize a release version so both ``1.2.3`` and ``v1.2.3`` work."""
     return version.removeprefix("v")
+
+
+async def runtime_linux_arch(runtime: Runtime) -> str:
+    """Return the architecture of the active Linux sandbox, not the host.
+
+    Docker Desktop can run an amd64 task image on an arm64 Mac (or vice versa),
+    so host architecture is not sufficient when selecting cached executables.
+    """
+    result = await runtime.run(["uname", "-m"], {})
+    if result.exit_code != 0:
+        detail = (result.stderr or result.stdout).strip() or "<no output>"
+        raise RuntimeError(f"failed to detect runtime architecture: {detail}")
+    try:
+        return linux_arch(result.stdout.strip())
+    except ValueError as error:
+        raise RuntimeError(
+            f"failed to detect runtime architecture: {result.stdout.strip()!r}"
+        ) from error
 
 
 async def run_install(runtime: Runtime, name: str, version: str, script: str) -> None:

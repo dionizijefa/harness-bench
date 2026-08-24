@@ -16,6 +16,7 @@ from harness_bloat_bench.harnesses.claude_code import (
     ClaudeCodeHarnessConfig,
     _claude_bin,
 )
+from harness_bloat_bench.harnesses._common import runtime_linux_arch
 from harness_bloat_bench.harnesses.claude_code import (
     _install_script as claude_code_install_script,
 )
@@ -105,6 +106,8 @@ class FakeRuntime:
 
     async def run(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.commands.append((argv, env))
+        if argv == ["uname", "-m"]:
+            return ProgramResult(exit_code=0, stdout="x86_64\n", stderr="")
         return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def write(self, path: str, data: bytes) -> None:
@@ -137,6 +140,21 @@ def context():
         ),
         sampling=SimpleNamespace(reasoning_effort=None),
     )
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [("x86_64", "x64"), ("amd64", "x64"), ("aarch64", "arm64")],
+)
+def test_runtime_architecture_is_detected_from_the_sandbox(
+    machine: str, expected: str
+) -> None:
+    class ArchitectureRuntime(FakeRuntime):
+        async def run(self, argv, env):
+            assert argv == ["uname", "-m"]
+            return ProgramResult(exit_code=0, stdout=f"{machine}\n", stderr="")
+
+    assert asyncio.run(runtime_linux_arch(ArchitectureRuntime())) == expected
 
 
 def test_every_declared_harness_has_a_default_version() -> None:
@@ -498,7 +516,7 @@ def test_pi_launch_uses_print_mode_and_isolated_model_registry() -> None:
     assert argv[argv.index("--exclude-tools") + 1] == "write,edit"
     assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
     assert {"--no-session", "--no-approve", "--offline"}.issubset(argv)
-    assert argv[-3:] == ["--print", "--", "Fix the tests"]
+    assert argv[-2:] == ["--print", "Fix the tests"]
     assert provider == {
         "api": "openai-completions",
         "apiKey": "$VF_INTERCEPT_KEY",
@@ -548,7 +566,7 @@ def test_pi_rlm_runtime_launch_enables_extension_and_prebuilt_kernel() -> None:
     assert "--rlm-runtime" in argv
     assert argv[argv.index("--rlm-runtime-max-depth") + 1] == "4"
     assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
-    assert argv[-3:] == ["--print", "--", "Fix the tests"]
+    assert argv[-2:] == ["--print", "Fix the tests"]
     assert provider["apiKey"] == "$VF_INTERCEPT_KEY"
     assert env["PI_RLM_RUNTIME_PYTHON"] == PI_RLM_RUNTIME_KERNEL_PYTHON
     assert env["LD_LIBRARY_PATH"] == PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR

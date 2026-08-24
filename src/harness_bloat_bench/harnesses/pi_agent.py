@@ -24,6 +24,7 @@ from ._common import (
     openai_compat_model_config,
     release_version,
     run_install,
+    runtime_linux_arch,
     shell_assignment,
 )
 
@@ -83,12 +84,14 @@ class PiAgentHarness(Harness[PiAgentHarnessConfig]):
 
     async def setup(self, runtime: Runtime) -> None:
         logger.info("pi-agent: loading Pi %s", self.config.version)
+        arch = await runtime_linux_arch(runtime)
         cached_tree = await asyncio.to_thread(
             ensure_docker_built_tree,
             harness="pi-agent",
             version=self.config.version,
             source_dir=PI_AGENT_DIR,
             install_script=_install_script(self.config.version),
+            arch=arch,
             bundle_python_runtime=False,
         )
         await stage_cached_tree(runtime, cached_tree, PI_AGENT_DIR)
@@ -140,7 +143,7 @@ test -f {shlex.quote(PI_AGENT_CLI)}
             argv += ["--exclude-tools", ",".join(self.config.disabled_tools)]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
-        argv += ["--print", "--", prompt]
+        argv += ["--print", prompt]
 
         env = {
             **self.config.resolved_env,

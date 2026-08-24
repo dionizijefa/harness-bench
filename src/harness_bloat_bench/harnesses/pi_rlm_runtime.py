@@ -25,6 +25,7 @@ from ._common import (
     openai_compat_model_config,
     release_version,
     run_install,
+    runtime_linux_arch,
     shell_assignment,
 )
 
@@ -115,12 +116,14 @@ class PiRlmRuntimeHarness(Harness[PiRlmRuntimeHarnessConfig]):
             self.config.version,
             PI_RLM_RUNTIME_PI_VERSION,
         )
+        arch = await runtime_linux_arch(runtime)
         cached_tree = await asyncio.to_thread(
             ensure_docker_built_tree,
             harness="pi-rlm-runtime",
             version=self.config.version,
             source_dir=PI_RLM_RUNTIME_DIR,
             install_script=_install_script(self.config.version),
+            arch=arch,
         )
         await stage_cached_tree(runtime, cached_tree, PI_RLM_RUNTIME_DIR)
         await run_install(
@@ -181,7 +184,7 @@ LD_LIBRARY_PATH={shlex.quote(PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR)} \
         ]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
-        argv += ["--print", "--", prompt]
+        argv += ["--print", prompt]
 
         env = {
             **self.config.resolved_env,

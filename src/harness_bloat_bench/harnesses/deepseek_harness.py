@@ -23,6 +23,7 @@ from ._common import (
     node_install_script,
     release_version,
     run_install,
+    runtime_linux_arch,
     shell_assignment,
 )
 
@@ -84,12 +85,14 @@ class DeepSeekHarness(Harness[DeepSeekHarnessConfig]):
         logger.info(
             "deepseek-harness: loading DeepSeek Harness %s", self.config.version
         )
+        arch = await runtime_linux_arch(runtime)
         cached_tree = await asyncio.to_thread(
             ensure_docker_built_tree,
             harness="deepseek-harness",
             version=self.config.version,
             source_dir=DEEPSEEK_HARNESS_DIR,
             install_script=_install_script(self.config.version),
+            arch=arch,
             bundle_python_runtime=False,
         )
         await stage_cached_tree(runtime, cached_tree, DEEPSEEK_HARNESS_DIR)

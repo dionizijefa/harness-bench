@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -23,6 +24,24 @@ from harness_bloat_bench.resource_monitor import (
     consume_resource_usage,
     enable_docker_resource_monitoring,
     reset_resource_usage,
+)
+from harness_bloat_bench.state import (
+    CampaignConflict,
+    active_combinations,
+    bind_combination_run,
+    combination_id,
+    create_campaign,
+    launchable_combinations,
+    mark_combination_queued,
+    mark_task_running,
+    mark_task_terminal,
+    new_campaign_id,
+    reconcile_combination,
+    state_database_path,
+    task_execution_id,
+    touch_task,
+    validate_campaign_id,
+    validate_combination_config,
 )
 
 HarnessId = Literal[
@@ -70,6 +89,11 @@ HARNESS_MATRIX_TAG = "harness_bloat/harness_matrix"
 BATCH_ID_TAG = "harness_bloat/batch_id"
 PROGRESS_TAG = "harness_bloat/progress"
 REASONING_EFFORT_TAG = "harness_bloat/reasoning_effort"
+CAMPAIGN_ID_TAG = "harness_bloat/campaign_id"
+COMBINATION_ID_TAG = "harness_bloat/combination_id"
+REPETITION_TAG = "harness_bloat/repetition"
+TASK_SELECTION_TAG = "harness_bloat/task_selection"
+TASK_COUNT_TAG = "harness_bloat/task_count"
 
 # Terminal-Bench tasks that require sending images to the model. Keep these out of
 # every rollout matrix because the benchmark's default text-only models cannot run
@@ -154,18 +178,8 @@ def _validate_remote_limits(remote: SSHExecutionConfig | dict | None) -> None:
             raise dg.Failure(f"remote.{name} must be positive")
 
 
-class MatrixConfig(dg.Config):
-    batch_id: str | None = None
-    models: list[str] = ["deepseek/deepseek-v4-flash-0731"]
+class ExecutionConfig(dg.Config):
     reasoning_effort: ReasoningEffort | None = None
-    # Empty means the default Codex Agent harness. Dagster requires nested-config list
-    # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
-    harnesses: list[HarnessSpec] = []
-    # Compatibility with the original Codex Agent-only launch schema. New configs should
-    # pair ids and versions through ``harnesses`` instead.
-    harness_versions: list[str] = []
-    task_ids: list[str] = ["crack-7z-hash"]
-    num_rollouts: int = 1
     dataset: str = "terminal-bench/terminal-bench-2-1"
     runtime: Literal["docker", "prime"] = "docker"
     container_cpus: float | None = 8.0
@@ -180,6 +194,51 @@ class MatrixConfig(dg.Config):
     run_type: Literal["test", "full"] = "full"
     dry_run: bool = False
     remote: SSHExecutionConfig | None = _configured_remote()
+
+
+class MatrixConfig(ExecutionConfig):
+    """Legacy all-in-one Dagster run configuration."""
+
+    batch_id: str | None = None
+    models: list[str] = ["deepseek/deepseek-v4-flash-0731"]
+    # Empty means the default Codex Agent harness. Dagster requires nested-config list
+    # defaults to be raw dicts, so resolve the semantic default in _harness_specs.
+    harnesses: list[HarnessSpec] = []
+    # Compatibility with the original Codex Agent-only launch schema. New configs should
+    # pair ids and versions through ``harnesses`` instead.
+    harness_versions: list[str] = []
+    task_ids: list[str] = ["crack-7z-hash"]
+    num_rollouts: int = 1
+
+
+class TaskSelectionConfig(dg.Config):
+    mode: Literal["full", "selected"] = "selected"
+    ids: list[str] = ["crack-7z-hash"]
+
+
+class CampaignConfig(ExecutionConfig):
+    """Configuration for a persisted campaign expanded into combination runs."""
+
+    campaign_id: str | None = None
+    batch_id: str | None = None
+    models: list[str] = ["deepseek/deepseek-v4-flash-0731"]
+    harnesses: list[HarnessSpec] = []
+    repetitions: int = 1
+    task_selection: TaskSelectionConfig = TaskSelectionConfig()
+    combination_max_concurrent: int = 8
+
+
+class CombinationRunConfig(ExecutionConfig):
+    campaign_id: str
+    combination_id: str
+    batch_id: str | None = None
+    model: str
+    harness: HarnessId
+    harness_version: str
+    repetition: int
+    task_selection_mode: Literal["full", "selected"]
+    task_ids: list[str]
+    state_db_path: str
 
 
 def _classification_tags(
@@ -264,6 +323,332 @@ def _task_ids(config: MatrixConfig) -> list[str]:
         for task in taskset.load()
         if (task_id := Path(task.data.task_dir).name) not in IMAGE_INPUT_TASK_IDS
     ]
+
+
+def _campaign_harness_specs(config: CampaignConfig) -> list[tuple[HarnessId, str]]:
+    entries = config.harnesses or [HarnessSpec()]
+    return list(
+        dict.fromkeys(
+            (
+                entry.id,
+                entry.version or DEFAULT_HARNESS_VERSIONS[entry.id],
+            )
+            for entry in entries
+        )
+    )
+
+
+def _campaign_task_ids(config: CampaignConfig) -> list[str]:
+    selection = config.task_selection
+    if selection.mode == "selected":
+        requested = list(
+            dict.fromkeys(task_id.rsplit("/", 1)[-1] for task_id in selection.ids)
+        )
+        if not requested:
+            raise dg.Failure("selected task mode requires at least one task ID")
+        runnable = [
+            task_id for task_id in requested if task_id not in IMAGE_INPUT_TASK_IDS
+        ]
+        if not runnable:
+            raise dg.Failure("the selected task list contains no runnable tasks")
+        return runnable
+
+    taskset = HarborTaskset(
+        HarborConfig(id="harbor", dataset=config.dataset, tasks=None)
+    )
+    task_ids = [
+        task_id
+        for task in taskset.load()
+        if (task_id := Path(task.data.task_dir).name) not in IMAGE_INPUT_TASK_IDS
+    ]
+    if not task_ids:
+        raise dg.Failure("full task discovery returned no runnable tasks")
+    return list(dict.fromkeys(task_ids))
+
+
+def _validate_execution_config(config: ExecutionConfig) -> None:
+    if (
+        config.rollout_timeout_seconds is not None
+        and config.rollout_timeout_seconds <= 0
+    ):
+        raise dg.Failure("rollout_timeout_seconds must be positive or null")
+    _validate_remote_limits(config.remote)
+    if config.runtime == "docker":
+        if config.container_cpus is not None and config.container_cpus <= 0:
+            raise dg.Failure("container_cpus must be positive or null")
+        if config.container_memory_gb is not None and config.container_memory_gb <= 0:
+            raise dg.Failure("container_memory_gb must be positive or null")
+
+
+def _combination_run_config(
+    config: CampaignConfig,
+    *,
+    campaign_key: str,
+    combination_key: str,
+    model: str,
+    harness: HarnessId,
+    harness_version: str,
+    repetition: int,
+    task_ids: list[str],
+    database_path: Path,
+) -> dict:
+    common = config.model_dump(
+        mode="json",
+        exclude={
+            "campaign_id",
+            "batch_id",
+            "models",
+            "harnesses",
+            "repetitions",
+            "task_selection",
+            "combination_max_concurrent",
+        },
+    )
+    child = CombinationRunConfig(
+        **common,
+        campaign_id=campaign_key,
+        combination_id=combination_key,
+        batch_id=config.batch_id,
+        model=model,
+        harness=harness,
+        harness_version=harness_version,
+        repetition=repetition,
+        task_selection_mode=config.task_selection.mode,
+        task_ids=task_ids,
+        state_db_path=str(database_path),
+    )
+    return {
+        "ops": {
+            "plan_task_executions": {
+                "config": child.model_dump(mode="json"),
+            }
+        },
+        "execution": {
+            "config": {"max_concurrent": config.combination_max_concurrent}
+        },
+    }
+
+
+def _task_mapping_key(task_id: str, execution_key: str) -> str:
+    readable = re.sub(r"[^A-Za-z0-9_]", "_", task_id).strip("_") or "task"
+    return f"{readable[:48]}__{execution_key.rsplit('_', 1)[-1][:10]}"
+
+
+@dg.op
+def plan_campaign(context: dg.OpExecutionContext, config: CampaignConfig) -> str:
+    """Snapshot a campaign and persist every logical task before launching it."""
+
+    _validate_execution_config(config)
+    if config.repetitions < 1:
+        raise dg.Failure("repetitions must be at least 1")
+    if config.combination_max_concurrent < 1:
+        raise dg.Failure("combination_max_concurrent must be at least 1")
+    if config.rollout_retries != 0:
+        raise dg.Failure(
+            "campaign execution retries are not implemented; rollout_retries must be 0"
+        )
+    if config.batch_id is not None and not config.batch_id.strip():
+        raise dg.Failure("batch_id must contain at least one non-whitespace character")
+
+    models = list(dict.fromkeys(config.models))
+    if not models:
+        raise dg.Failure("models must contain at least one model")
+    harness_specs = _campaign_harness_specs(config)
+    task_ids = _campaign_task_ids(config)
+    campaign_key = (
+        validate_campaign_id(config.campaign_id)
+        if config.campaign_id is not None
+        else new_campaign_id()
+    )
+    database_path = state_database_path()
+
+    planned: list[dict] = []
+    for model, harness_spec, repetition in product(
+        models,
+        harness_specs,
+        range(1, config.repetitions + 1),
+    ):
+        harness, harness_version = harness_spec
+        combination_key = combination_id(
+            campaign_key,
+            model,
+            harness,
+            harness_version,
+            repetition,
+        )
+        planned.append(
+            {
+                "combination_id": combination_key,
+                "model": model,
+                "harness": harness,
+                "harness_version": harness_version,
+                "repetition": repetition,
+                "run_config": _combination_run_config(
+                    config,
+                    campaign_key=campaign_key,
+                    combination_key=combination_key,
+                    model=model,
+                    harness=harness,
+                    harness_version=harness_version,
+                    repetition=repetition,
+                    task_ids=task_ids,
+                    database_path=database_path,
+                ),
+            }
+        )
+
+    manifest = {
+        "campaign_id": campaign_key,
+        "batch_id": config.batch_id,
+        "dataset": config.dataset,
+        "models": models,
+        "harnesses": [
+            {"id": harness, "version": version}
+            for harness, version in harness_specs
+        ],
+        "repetitions": config.repetitions,
+        "task_selection_mode": config.task_selection.mode,
+        "task_ids": task_ids,
+        "execution": config.model_dump(
+            mode="json",
+            exclude={
+                "campaign_id",
+                "batch_id",
+                "models",
+                "harnesses",
+                "repetitions",
+                "task_selection",
+            },
+        ),
+    }
+    try:
+        created = create_campaign(
+            database_path,
+            manifest=manifest,
+            planner_run_id=context.run_id,
+            combinations=planned,
+        )
+    except (CampaignConflict, ValueError) as error:
+        raise dg.Failure(str(error)) from error
+
+    total_tasks = len(planned) * len(task_ids)
+    tags = {
+        CAMPAIGN_ID_TAG: campaign_key,
+        RUN_TYPE_TAG: "test" if config.dry_run else config.run_type,
+        DRY_RUN_TAG: str(config.dry_run).lower(),
+        MODEL_TAG: ",".join(models),
+        HARNESS_TAG: ",".join(dict.fromkeys(h for h, _ in harness_specs)),
+        HARNESS_VERSION_TAG: ",".join(
+            dict.fromkeys(version for _, version in harness_specs)
+        ),
+        HARNESS_MATRIX_TAG: ",".join(
+            f"{harness}@{version}" for harness, version in harness_specs
+        ),
+        TASK_SELECTION_TAG: config.task_selection.mode,
+        TASK_COUNT_TAG: str(len(task_ids)),
+    }
+    if config.batch_id is not None:
+        tags[BATCH_ID_TAG] = config.batch_id
+    if config.reasoning_effort is not None:
+        tags[REASONING_EFFORT_TAG] = config.reasoning_effort.value
+    context.instance.add_run_tags(context.run_id, tags)
+    context.add_output_metadata(
+        {
+            "campaign_id": campaign_key,
+            "state_database": dg.MetadataValue.path(str(database_path)),
+            "created": created,
+            "combinations": len(planned),
+            "tasks_per_combination": len(task_ids),
+            "task_executions": total_tasks,
+            "task_selection": config.task_selection.mode,
+        }
+    )
+    context.log.info(
+        "%s campaign %s with %d combinations and %d task executions",
+        "Created" if created else "Reused",
+        campaign_key,
+        len(planned),
+        total_tasks,
+    )
+    return campaign_key
+
+
+@dg.op(out=dg.DynamicOut(dict))
+def plan_task_executions(
+    context: dg.OpExecutionContext, config: CombinationRunConfig
+) -> Iterator[dg.DynamicOutput[dict]]:
+    _validate_execution_config(config)
+    expected_combination_id = combination_id(
+        config.campaign_id,
+        config.model,
+        config.harness,
+        config.harness_version,
+        config.repetition,
+    )
+    if config.combination_id != expected_combination_id:
+        raise dg.Failure(
+            "combination_id does not match the deterministic combination identity"
+        )
+    if not config.task_ids:
+        raise dg.Failure("combination task list is empty")
+
+    database_path = Path(config.state_db_path)
+    validate_combination_config(
+        database_path,
+        config.combination_id,
+        config.model_dump(mode="json"),
+    )
+    bind_combination_run(
+        database_path,
+        config.combination_id,
+        context.run_id,
+        started=True,
+    )
+    tags = {
+        CAMPAIGN_ID_TAG: config.campaign_id,
+        COMBINATION_ID_TAG: config.combination_id,
+        RUN_TYPE_TAG: "test" if config.dry_run else config.run_type,
+        DRY_RUN_TAG: str(config.dry_run).lower(),
+        MODEL_TAG: config.model,
+        HARNESS_TAG: config.harness,
+        HARNESS_VERSION_TAG: config.harness_version,
+        HARNESS_MATRIX_TAG: f"{config.harness}@{config.harness_version}",
+        REPETITION_TAG: str(config.repetition),
+        TASK_SELECTION_TAG: config.task_selection_mode,
+        TASK_COUNT_TAG: str(len(config.task_ids)),
+        PROGRESS_TAG: _progress_text(0, len(config.task_ids)),
+    }
+    if config.batch_id is not None:
+        tags[BATCH_ID_TAG] = config.batch_id
+    if config.reasoning_effort is not None:
+        tags[REASONING_EFFORT_TAG] = config.reasoning_effort.value
+    context.instance.add_run_tags(context.run_id, tags)
+
+    common = config.model_dump(mode="json")
+    for task_id in config.task_ids:
+        execution_key = task_execution_id(config.combination_id, task_id)
+        spec = {
+            **common,
+            "key": execution_key,
+            "task_execution_id": execution_key,
+            "task_id": task_id,
+            "rollout": config.repetition,
+            "total_rollouts": len(config.task_ids),
+        }
+        yield dg.DynamicOutput(
+            spec,
+            mapping_key=_task_mapping_key(task_id, execution_key),
+            metadata={
+                "campaign_id": config.campaign_id,
+                "combination_id": config.combination_id,
+                "task_execution_id": execution_key,
+                "task": task_id,
+                "model": config.model,
+                "harness": config.harness,
+                "harness_version": config.harness_version,
+                "repetition": config.repetition,
+            },
+        )
 
 
 @dg.op(out=dg.DynamicOut(dict))
@@ -412,6 +797,9 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
     output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
     base = {
         "dagster_run_id": dagster_run_id,
+        "campaign_id": spec.get("campaign_id"),
+        "combination_id": spec.get("combination_id"),
+        "task_execution_id": spec.get("task_execution_id"),
         "batch_id": spec.get("batch_id"),
         "rollout_key": spec["key"],
         "model": spec["model"],
@@ -428,6 +816,7 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
             spec.get("container_memory_gb") if spec["runtime"] == "docker" else None
         ),
         "output_dir": str(output_dir),
+        "state_db_path": spec.get("state_db_path"),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     if spec["dry_run"]:
@@ -497,6 +886,9 @@ def _hard_failure_row(
     output_dir = Path(spec["output_dir"]) / dagster_run_id / spec["key"]
     return {
         "dagster_run_id": dagster_run_id,
+        "campaign_id": spec.get("campaign_id"),
+        "combination_id": spec.get("combination_id"),
+        "task_execution_id": spec.get("task_execution_id"),
         "batch_id": spec.get("batch_id"),
         "rollout_key": spec["key"],
         "model": spec["model"],
@@ -513,6 +905,7 @@ def _hard_failure_row(
             spec.get("container_memory_gb") if spec.get("runtime") == "docker" else None
         ),
         "output_dir": str(output_dir),
+        "state_db_path": spec.get("state_db_path"),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "status": "error",
         "passed": False,
@@ -747,6 +1140,12 @@ def _wait_for_remote_job(
     payload = initial
     transport_failures = 0
     while True:
+        if spec.get("task_execution_id") and spec.get("state_db_path"):
+            touch_task(
+                Path(spec["state_db_path"]),
+                spec["task_execution_id"],
+                remote_job_id=job_id,
+            )
         state = payload.get("state")
         if state == "completed":
             row = payload.get("row")
@@ -822,6 +1221,22 @@ def _run_remote_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
 @dg.op(pool="rollouts")
 def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
     started = time.perf_counter()
+    execution_key = spec.get("task_execution_id")
+    state_path = Path(spec["state_db_path"]) if spec.get("state_db_path") else None
+    tracking_started = False
+    if execution_key and state_path is not None:
+        mark_task_running(
+            state_path,
+            execution_key,
+            dagster_run_id=context.run_id,
+            dagster_step_key=context.get_step_execution_context().step.key,
+            remote_job_id=(
+                _remote_job_id(context.run_id, spec["key"])
+                if spec.get("remote")
+                else None
+            ),
+        )
+        tracking_started = True
     try:
         row = (
             _run_remote_rollout(context, spec)
@@ -833,6 +1248,15 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
             spec, context.run_id, error, time.perf_counter() - started
         )
         database_path = _persist_rollout_row(row)
+        if tracking_started:
+            mark_task_terminal(
+                state_path,
+                execution_key,
+                state="error",
+                outcome=None,
+                error_type=type(error).__name__,
+                error_message=str(error),
+            )
         _report_run_progress(
             context, database_path, context.run_id, spec["total_rollouts"]
         )
@@ -844,10 +1268,45 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
         raise
 
     database_path = _persist_rollout_row(row)
+    if tracking_started:
+        row_error = row.get("error")
+        if row.get("status") == "error":
+            mark_task_terminal(
+                state_path,
+                execution_key,
+                state="error",
+                outcome=None,
+                error_type=(
+                    row_error.get("type")
+                    if isinstance(row_error, dict)
+                    else "RolloutTraceError"
+                ),
+                error_message=(
+                    row_error.get("message")
+                    if isinstance(row_error, dict)
+                    else str(row_error or "rollout trace reported an error")
+                ),
+            )
+        else:
+            mark_task_terminal(
+                state_path,
+                execution_key,
+                state="completed",
+                outcome=row["status"],
+            )
     progress_metadata = _report_run_progress(
         context, database_path, context.run_id, spec["total_rollouts"]
     )
+    if tracking_started and row.get("status") == "error":
+        detail = row.get("error")
+        context.log.error("Rollout trace reported an execution error: %s", detail)
+        raise dg.Failure(
+            f"task execution {execution_key} completed with a rollout trace error"
+        )
     metadata = dict(progress_metadata)
+    for key in ("campaign_id", "combination_id", "task_execution_id"):
+        if row.get(key) is not None:
+            metadata[key] = row[key]
     if row.get("reasoning_effort") is not None:
         metadata["reasoning_effort"] = row["reasoning_effort"]
     if not spec["dry_run"]:
@@ -886,8 +1345,14 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
     return row
 
 
-def _write_results_db(rows: list[dict], output_root: Path) -> Path:
-    path = output_root / "results.sqlite"
+def _write_results_db(
+    rows: list[dict],
+    output_root: Path,
+    *,
+    database_path: Path | None = None,
+) -> Path:
+    path = database_path or output_root / "results.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     try:
         connection.execute("PRAGMA busy_timeout=30000")
@@ -902,6 +1367,9 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 """
                 CREATE TABLE IF NOT EXISTS rollout_results (
                     dagster_run_id TEXT NOT NULL,
+                    campaign_id TEXT,
+                    combination_id TEXT,
+                    task_execution_id TEXT,
                     batch_id TEXT,
                     rollout_key TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
@@ -969,6 +1437,9 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 "peak_pids": "INTEGER",
                 "oom_kill_count": "INTEGER",
                 "batch_id": "TEXT",
+                "campaign_id": "TEXT",
+                "combination_id": "TEXT",
+                "task_execution_id": "TEXT",
             }.items():
                 if column not in existing_columns:
                     connection.execute(
@@ -978,9 +1449,17 @@ def _write_results_db(rows: list[dict], output_root: Path) -> Path:
                 "CREATE INDEX IF NOT EXISTS rollout_results_batch "
                 "ON rollout_results (batch_id)"
             )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS rollout_results_task_execution "
+                "ON rollout_results (task_execution_id) "
+                "WHERE task_execution_id IS NOT NULL"
+            )
 
             columns = (
                 "dagster_run_id",
+                "campaign_id",
+                "combination_id",
+                "task_execution_id",
                 "batch_id",
                 "rollout_key",
                 "timestamp",
@@ -1043,6 +1522,9 @@ def _database_values(row: dict) -> tuple:
     )
     return (
         row["dagster_run_id"],
+        row.get("campaign_id"),
+        row.get("combination_id"),
+        row.get("task_execution_id"),
         row.get("batch_id"),
         row["rollout_key"],
         row["timestamp"],
@@ -1084,6 +1566,11 @@ def _database_values(row: dict) -> tuple:
 
 
 def _persist_rollout_row(row: dict) -> Path:
+    if row.get("state_db_path"):
+        database_path = Path(row["state_db_path"])
+        return _write_results_db(
+            [row], database_path.parent, database_path=database_path
+        )
     output_root = Path(row["output_dir"]).parents[1]
     output_root.mkdir(parents=True, exist_ok=True)
     return _write_results_db([row], output_root)
@@ -1131,7 +1618,14 @@ def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
     if not rows:
         raise dg.Failure("no rollout results were produced")
     run_dir = Path(rows[0]["output_dir"]).parent
-    database_path = _write_results_db(rows, run_dir.parent)
+    configured_database = (
+        Path(rows[0]["state_db_path"]) if rows[0].get("state_db_path") else None
+    )
+    database_path = _write_results_db(
+        rows,
+        run_dir.parent,
+        database_path=configured_database,
+    )
     measured = [row for row in rows if row.get("resource_usage_source")]
     metadata = {
         "database": dg.MetadataValue.path(str(database_path)),
@@ -1172,4 +1666,101 @@ def terminal_bench_rollouts() -> None:
     write_results(plan_rollouts().map(run_rollout).collect())
 
 
-defs = dg.Definitions(jobs=[terminal_bench_rollouts])
+@dg.job
+def plan_terminal_bench_campaign() -> None:
+    plan_campaign()
+
+
+@dg.job(executor_def=rollout_executor)
+def terminal_bench_combination() -> None:
+    write_results(plan_task_executions().map(run_rollout).collect())
+
+
+def _combination_run_tags(row: dict, run_config: dict) -> dict[str, str]:
+    config = run_config["ops"]["plan_task_executions"]["config"]
+    tags = {
+        CAMPAIGN_ID_TAG: row["campaign_id"],
+        COMBINATION_ID_TAG: row["combination_id"],
+        RUN_TYPE_TAG: "test" if config["dry_run"] else config["run_type"],
+        DRY_RUN_TAG: str(config["dry_run"]).lower(),
+        MODEL_TAG: row["model"],
+        HARNESS_TAG: row["harness"],
+        HARNESS_VERSION_TAG: row["harness_version"],
+        HARNESS_MATRIX_TAG: f"{row['harness']}@{row['harness_version']}",
+        REPETITION_TAG: str(row["repetition"]),
+        TASK_SELECTION_TAG: config["task_selection_mode"],
+        TASK_COUNT_TAG: str(len(config["task_ids"])),
+        PROGRESS_TAG: _progress_text(0, len(config["task_ids"])),
+    }
+    if config.get("batch_id") is not None:
+        tags[BATCH_ID_TAG] = config["batch_id"]
+    if config.get("reasoning_effort") is not None:
+        tags[REASONING_EFFORT_TAG] = config["reasoning_effort"]
+    return tags
+
+
+@dg.sensor(
+    job=terminal_bench_combination,
+    minimum_interval_seconds=5,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+    description="Launch and reconcile one Dagster run per benchmark combination.",
+)
+def terminal_bench_campaign_sensor(
+    context: dg.SensorEvaluationContext,
+) -> Iterator[dg.RunRequest | dg.SkipReason]:
+    database_path = state_database_path()
+    if not database_path.is_file():
+        yield dg.SkipReason(f"state database does not exist yet: {database_path}")
+        return
+
+    # Bind queued RunRequests to their physical Dagster IDs and project Dagster
+    # terminal states onto tasks that could not report their own final state.
+    for combination in active_combinations(database_path):
+        run = None
+        if combination.get("dagster_run_id"):
+            run = context.instance.get_run_by_id(combination["dagster_run_id"])
+        if run is None:
+            matching = context.instance.get_runs(
+                filters=dg.RunsFilter(
+                    job_name=terminal_bench_combination.name,
+                    tags={COMBINATION_ID_TAG: combination["combination_id"]},
+                ),
+                limit=1,
+            )
+            run = matching[0] if matching else None
+        if run is not None:
+            reconcile_combination(
+                database_path,
+                combination["combination_id"],
+                dagster_run_id=run.run_id,
+                dagster_status=run.status.value,
+            )
+
+    try:
+        launch_limit = int(os.environ.get("HARNESS_BLOAT_CAMPAIGN_LAUNCH_BATCH", "100"))
+    except ValueError:
+        launch_limit = 100
+    launch_limit = max(1, launch_limit)
+    pending = launchable_combinations(database_path, limit=launch_limit)
+    if not pending:
+        yield dg.SkipReason("no campaign combinations are waiting to launch")
+        return
+
+    for combination in pending:
+        run_config = json.loads(combination["run_config_json"])
+        mark_combination_queued(database_path, combination["combination_id"])
+        yield dg.RunRequest(
+            run_key=combination["combination_id"],
+            run_config=run_config,
+            tags=_combination_run_tags(combination, run_config),
+        )
+
+
+defs = dg.Definitions(
+    jobs=[
+        plan_terminal_bench_campaign,
+        terminal_bench_combination,
+        terminal_bench_rollouts,
+    ],
+    sensors=[terminal_bench_campaign_sensor],
+)

@@ -2,7 +2,10 @@
 
 Terminal-Bench 2.1 rollouts using [Prime Intellect Verifiers v1](https://github.com/PrimeIntellect-ai/verifiers) with Dagster as the control plane.
 
-Each dynamically mapped `run_rollout` step is exactly one Verifiers rollout.
+Campaigns are expanded into one Dagster run per
+`model × harness/version × repetition` combination. Each dynamically mapped
+`run_rollout` step inside a combination is exactly one Terminal-Bench task and
+one Verifiers rollout.
 
 # WARNING HUMANS: README FOR LLMs below
 
@@ -30,13 +33,15 @@ the Dock with:
 Clicking the Dock icon runs `scripts/dagster-ui` in Terminal on port 3210 and
 opens the UI in the default browser once it is ready.
 
-Open the Dagster UI, select `terminal_bench_rollouts`, and paste this into the Launchpad:
+Open the Dagster UI, select `plan_terminal_bench_campaign`, and paste this into
+the Launchpad:
 
 ```yaml
 ops:
-  plan_rollouts:
+  plan_campaign:
     config:
-      batch_id: experiment-2026-08-15-a
+      campaign_id: terminal-bench-2026-08-24-a
+      batch_id: experiment-2026-08
       models: [deepseek/deepseek-v4-flash-0731]
       reasoning_effort: high
       harnesses:
@@ -45,21 +50,51 @@ ops:
         - id: hermes_agent
         - id: opencode
         - id: omp_agent
-        - id: prime_agent
-      task_ids: [adaptive-rejection-sampler]
-      num_rollouts: 5
+      repetitions: 3
+      task_selection:
+        mode: full
       run_type: full
       container_cpus: 8
       container_memory_gb: 18
       rollout_timeout_seconds: 5400
-
-execution:
-  config:
-    max_concurrent: 8
+      combination_max_concurrent: 8
 ```
 
-The `rollouts` pool limit is global across Dagster runs; `max_concurrent` is
-the per-run process limit. The UI launcher currently provides eight global
+The planner snapshots the exact runnable task list and writes the complete
+campaign manifest to `outputs/results.sqlite` before any model work starts. It
+then exits. The default-enabled `terminal_bench_campaign_sensor` launches one
+`terminal_bench_combination` Dagster run for every model, harness/version, and
+repetition. The example therefore creates 15 independently visible combination
+runs. With the current 78 runnable tasks, it plans 1,170 task executions.
+Set `HARNESS_BLOAT_STATE_DB` to move the central state/result database;
+`output_dir` controls trajectory directories and does not relocate campaign
+state.
+
+For a one-task test, use an explicit selection:
+
+```yaml
+      repetitions: 1
+      task_selection:
+        mode: selected
+        ids: [adaptive-rejection-sampler]
+      run_type: test
+```
+
+`mode: full` always discovers and freezes the full runnable dataset at planning
+time. `mode: selected` requires one or more task IDs. Image-input tasks are
+excluded in either mode.
+
+`campaign_id` is the immutable logical identity of one launch. Omit it to
+generate a new ID, or set it explicitly so re-submitting the identical plan is
+idempotent. Reusing an explicit ID with different configuration is rejected.
+Combination IDs are deterministic from campaign, model, harness/version, and
+repetition; task-execution IDs are deterministic from combination and task.
+Retries are not implemented: a terminal combination is never automatically
+submitted again.
+
+The `rollouts` pool limit is global across Dagster runs;
+`combination_max_concurrent` becomes the process limit within each combination
+run. The UI launcher currently provides eight global
 rollout slots. On the 64-thread / 125 GiB worker, Docker rollouts default to a
 hard limit of 8 CPUs and 18 GiB each, capping the aggregate CPU quota at 64
 threads. Docker memory limits are ceilings rather than reservations, so eight
@@ -70,9 +105,24 @@ Launchpad when measurements justify a different profile. The ignored `.env`
 can override the global slot count with `HARNESS_BLOAT_ROLLOUT_SLOTS`; restart
 the launcher after changing it.
 
-While a run is active, its `harness_bloat/progress` tag reports completed
-rollouts as a percentage and count, for example `40% · 4/10 rollouts`. The same
-values appear in each completed rollout's output metadata and event log.
+While a combination run is active, its `harness_bloat/progress` tag reports
+terminal tasks as a percentage and count, for example `40% · 4/10 rollouts`.
+The same values appear in each terminal task's output metadata and event log.
+Filter the Dagster Runs page by `harness_bloat/campaign_id` to see every
+combination belonging to one campaign. Mapped step names retain a readable task
+slug, for example `run_rollout[adaptive_rejection_sampler__…]`, while their
+metadata contains the full task and deterministic task-execution IDs.
+
+The state database distinguishes execution state (`planned`, `queued`,
+`running`, `completed`, `error`, or `cancelled`) from benchmark outcome
+(`passed`, `failed`, or `dry_run`). A scored failure is therefore a completed
+execution, while an infrastructure failure is an execution error. Inspect live
+state, including the exact active task IDs, with:
+
+```sh
+./scripts/benchmark-status
+./scripts/benchmark-status terminal-bench-2026-08-24-a
+```
 
 Agent execution is capped at 5,400 seconds (90 minutes) per rollout by default.
 This framework timeout covers the harness run, while setup and scoring remain
@@ -80,16 +130,17 @@ separate stages. Override `rollout_timeout_seconds` for a run, or set it to
 `null` to disable the limit.
 
 Every run is automatically tagged in Dagster from its actual configuration.
-Set the optional `batch_id` to an experiment identifier shared by every
-rollout in the matrix. It is stored on every result and exposed as the
-`harness_bloat/batch_id` Dagster run tag, so the same identifier can group
-related Dagster runs. Omit it (or set it to `null`) for an unassigned batch.
+Set the optional `batch_id` to an experiment identifier that may group multiple
+campaigns. It is stored on every result and exposed as the
+`harness_bloat/batch_id` Dagster run tag. Omit it (or set it to `null`) for an
+unassigned batch.
 Set `run_type: test` for a real canary or smoke rollout and `run_type: full` for
 a complete benchmark; full is the default, while `dry_run: true` always implies
 test. The Runs page can filter on `harness_bloat/run_type`,
+`harness_bloat/campaign_id`, `harness_bloat/combination_id`,
 `harness_bloat/batch_id`, `harness_bloat/model`, `harness_bloat/harness`,
 `harness_bloat/harness_version`, `harness_bloat/harness_matrix`, and
-`harness_bloat/reasoning_effort`. The matrix tag retains exact harness/version
+`harness_bloat/repetition`. The matrix tag retains exact harness/version
 pairs, such as
 `codex_agent@0.140.0,codex_agent@0.147.0`. The companion
 `harness_bloat/dry_run=true|false` tag distinguishes a real test rollout from a
@@ -157,16 +208,20 @@ This checks the connection, syncs the project, runs `uv sync` remotely, and
 writes the host and path to the ignored `.dagster/remote.json`. It uses
 `~/harness-bloat-bench` on the worker by default; pass an absolute path as a
 second argument to override it. Restart
-`./scripts/dagster-ui`, select `terminal_bench_rollouts`, and click **Launch
-Run**. The private remote config is automatically used as the job default.
+`./scripts/dagster-ui`, select `plan_terminal_bench_campaign`, and click
+**Launch Run**. The private remote config is automatically used by every child
+combination run.
 
 An explicit Launchpad `remote` block overrides the private default when needed:
 
 ```yaml
 ops:
-  plan_rollouts:
+  plan_campaign:
     config:
-      task_ids: [adaptive-rejection-sampler]
+      campaign_id: remote-canary-2026-08-24-a
+      task_selection:
+        mode: selected
+        ids: [adaptive-rejection-sampler]
       remote:
         host: terminal-bench
         project_dir: /home/REMOTE_USER/harness-bloat-bench
@@ -175,7 +230,9 @@ ops:
         reconnect_delay_seconds: 5
 ```
 
-A complete non-secret example is checked in at `configs/remote.example.yaml`.
+A complete non-secret campaign example is checked in at
+`configs/campaign-remote.example.yaml`. `configs/remote.example.yaml` remains
+the legacy all-in-one job example.
 
 Each mapped rollout submits an idempotent durable job named from its Dagster run
 ID and rollout key. The worker detaches before the submission SSH session exits,
@@ -244,23 +301,25 @@ reward 1. Their traces and result rows were recovered before releasing the two
 stale slots. The keepalive and outer-deadline controls above were added in
 response.
 
-Remote runs currently require explicit `task_ids`; `task_ids: []` performs
-dataset discovery locally and is therefore rejected in SSH mode. The remote
-setup command can be rerun to resync after local code or lockfile changes.
+Campaign runs support both task-selection modes with an SSH worker: the local
+planner snapshots `mode: full` discovery before it creates remote combination
+runs. The legacy `terminal_bench_rollouts` job still requires explicit
+`task_ids` in SSH mode. The remote setup command can be rerun to resync after
+local code or lockfile changes.
 
 `.env`, `.env.*`, and the entire `.dagster/` directory are ignored. The
 OpenRouter key, SSH host, username, key paths, and remote filesystem paths must
 stay in those private files or in `~/.ssh/config`, never in committed config.
 
-For local runs, let Dagster expand every runnable task in the dataset with
-`task_ids: []`. Tasks that require image input are always excluded from both
-discovered and explicit task lists. To verify the graph without Docker or model
-calls, set `dry_run: true` and provide at least one runnable task ID.
+The original `terminal_bench_rollouts` job remains available for checked-in
+version matrices and compatibility. It keeps the old `task_ids` and
+`num_rollouts` schema and displays its entire matrix as one Dagster run. New
+benchmark launches should use `plan_terminal_bench_campaign`.
 
-Headless execution uses the same run config:
+Headless execution of the legacy job uses its existing run config:
 
 ```sh
-uv run dagster job execute \
+uv run python -m dagster job execute \
   -m harness_bloat_bench.definitions \
   -j terminal_bench_rollouts \
   -c run_config.yaml
@@ -269,11 +328,15 @@ uv run dagster job execute \
 A checked-in smoke config exercises the full Dagster control plane without model or Docker calls:
 
 ```sh
-uv run dagster job execute \
+uv run python -m dagster job execute \
   -m harness_bloat_bench.definitions \
   -j terminal_bench_rollouts \
   -c configs/dry-run.yaml
 ```
+
+`configs/campaign-dry-run.yaml` can be launched as
+`plan_terminal_bench_campaign` from the UI to exercise planner, sensor, child
+runs, state aggregation, and deterministic IDs without Docker or model calls.
 
 Verifiers writes `config.toml` and `traces.jsonl` beneath
 `outputs/<dagster-run-id>/<rollout>/`. Each rollout is independently upserted
@@ -284,9 +347,12 @@ results file is created.
 
 ## Results database
 
-The `rollout_results` table records the optional batch ID, model, declared
-reasoning effort, harness and exact harness version, dataset, task, rollout
-number, status, pass/fail result, reward, runtime, token usage, model-call count,
+The `benchmark_campaigns`, `benchmark_combinations`, and
+`benchmark_task_executions` tables contain the complete planned and live state.
+The `rollout_results` table contains terminal measurements and records campaign,
+combination, deterministic task-execution ID, optional batch ID, model, declared
+reasoning effort, harness and exact harness version, dataset, task, repetition,
+status, pass/fail result, reward, runtime, token usage, model-call count, and
 provider-reported USD cost,
 trace ID, error details, configured container limits, cumulative container CPU
 time, peak container memory, disk I/O, peak process count, and OOM kills.

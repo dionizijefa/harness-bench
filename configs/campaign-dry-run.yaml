@@ -1,0 +1,17 @@
+ops:
+  plan_campaign:
+    config:
+      batch_id: campaign-smoke
+      models: [dry-run-model]
+      harnesses:
+        - id: codex_agent
+        - id: claude_code_agent
+      repetitions: 2
+      task_selection:
+        mode: selected
+        ids: [crack-7z-hash]
+      output_dir: outputs/campaign-dry-run
+      run_type: test
+      dry_run: true
+      remote: null
+      combination_max_concurrent: 2

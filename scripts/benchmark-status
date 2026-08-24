@@ -1,0 +1,147 @@
+#!/usr/bin/env -S uv run python
+"""Show campaign, combination, and currently running task state."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from harness_bloat_bench.state import (
+    campaign_combinations,
+    campaigns,
+    running_tasks,
+    state_database_path,
+)
+
+
+def _print_rows(headers: list[str], rows: list[list[object]]) -> None:
+    if not rows:
+        print("(none)")
+        return
+    widths = [len(header) for header in headers]
+    rendered = [
+        [str(value if value is not None else "-") for value in row] for row in rows
+    ]
+    for row in rendered:
+        widths = [max(width, len(value)) for width, value in zip(widths, row)]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, widths)))
+    print("  ".join("-" * width for width in widths))
+    for row in rendered:
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("campaign_id", nargs="?", help="show one campaign in detail")
+    parser.add_argument(
+        "--database",
+        type=Path,
+        default=state_database_path(),
+        help=(
+            "state database (default: HARNESS_BLOAT_STATE_DB or "
+            "outputs/results.sqlite)"
+        ),
+    )
+    args = parser.parse_args()
+    database = args.database.expanduser().resolve()
+    if not database.is_file():
+        raise SystemExit(f"state database does not exist: {database}")
+
+    if args.campaign_id is None:
+        values = campaigns(database)
+        _print_rows(
+            [
+                "CAMPAIGN",
+                "STATE",
+                "TASKS/COMBO",
+                "COMBO P/Q/R/C/E",
+                "TASKS TERMINAL/TOTAL",
+                "ACTIVE TASKS",
+                "PASSED",
+                "SCORED FAILED",
+                "ERROR/CANCEL",
+            ],
+            [
+                [
+                    row["campaign_id"],
+                    row["state"],
+                    row["task_count"],
+                    "/".join(
+                        str(row[key] or 0)
+                        for key in (
+                            "planned_combinations",
+                            "queued_combinations",
+                            "running_combinations",
+                            "completed_combinations",
+                            "failed_combinations",
+                        )
+                    ),
+                    f"{row['terminal_tasks'] or 0}/{row['task_execution_count']}",
+                    row["running_tasks"] or 0,
+                    row["passed_tasks"] or 0,
+                    row["failed_tasks"] or 0,
+                    row["errored_tasks"] or 0,
+                ]
+                for row in values
+            ],
+        )
+        return
+
+    combinations = campaign_combinations(database, args.campaign_id)
+    if not combinations:
+        raise SystemExit(f"campaign does not exist: {args.campaign_id}")
+    _print_rows(
+        [
+            "COMBINATION",
+            "MODEL",
+            "HARNESS",
+            "VERSION",
+            "REP",
+            "STATE",
+            "TERMINAL",
+            "TOTAL",
+            "RUNNING",
+            "PASSED",
+            "FAILED",
+            "ERRORS",
+        ],
+        [
+            [
+                row["combination_id"],
+                row["model"],
+                row["harness"],
+                row["harness_version"],
+                row["repetition"],
+                row["state"],
+                row["terminal_tasks"],
+                row["expected_task_count"],
+                row["running_tasks"],
+                row["passed_tasks"],
+                row["failed_tasks"],
+                row["errored_tasks"],
+            ]
+            for row in combinations
+        ],
+    )
+
+    active = running_tasks(database, args.campaign_id)
+    print("\nCurrently running tasks")
+    _print_rows(
+        ["TASK", "MODEL", "HARNESS", "VERSION", "REP", "STARTED", "REMOTE JOB"],
+        [
+            [
+                row["task_id"],
+                row["model"],
+                row["harness"],
+                row["harness_version"],
+                row["repetition"],
+                row["started_at"],
+                row["remote_job_id"],
+            ]
+            for row in active
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()

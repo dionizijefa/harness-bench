@@ -1,0 +1,25 @@
+ops:
+  plan_campaign:
+    config:
+      campaign_id: remote-campaign-example
+      models: [deepseek/deepseek-v4-flash-0731]
+      harnesses:
+        - id: codex_agent
+        - id: claude_code_agent
+      repetitions: 1
+      task_selection:
+        mode: selected
+        ids: [adaptive-rejection-sampler]
+      run_type: test
+      container_cpus: 8
+      container_memory_gb: 18
+      remote:
+        host: terminal-bench
+        project_dir: /home/REMOTE_USER/harness-bloat-bench
+        copy_artifacts: false
+        timeout_grace_seconds: 1800
+        poll_interval_seconds: 15
+        reconnect_delay_seconds: 5
+        ssh_command_timeout_seconds: 60
+        submit_timeout_seconds: 300
+      combination_max_concurrent: 8

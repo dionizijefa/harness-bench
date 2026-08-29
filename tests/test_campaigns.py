@@ -288,6 +288,73 @@ def test_worker_pool_sensor_routes_compute_and_centralizes_sqlite_writes(
     assert all(worker and reused == 0 for worker, reused in rows)
 
 
+def test_failed_grade_completes_execution_and_keeps_dagster_successful(
+    monkeypatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / "state.sqlite"
+    monkeypatch.setenv("HARNESS_BLOAT_STATE_DB", str(database_path))
+    monkeypatch.setattr(definitions, "ensure_harness_cached", lambda *_args: None)
+    monkeypatch.setattr(definitions, "Environment", lambda _config: object())
+    monkeypatch.setattr(definitions, "reset_resource_usage", lambda: None)
+    monkeypatch.setattr(
+        definitions, "enable_docker_resource_monitoring", lambda: None
+    )
+    monkeypatch.setattr(definitions, "consume_resource_usage", lambda: {})
+
+    async def failed_grade(_environment, _config):
+        return [
+            SimpleNamespace(
+                id="trace-failed-grade",
+                error=None,
+                reward=0.0,
+                rewards={"solved": 0.0},
+                usage=None,
+                calls=[],
+                num_input_tokens=1,
+                num_output_tokens=2,
+                num_total_tokens=3,
+            )
+        ]
+
+    monkeypatch.setattr(definitions, "run_eval", failed_grade)
+    instance = dg.DagsterInstance.ephemeral()
+    planner = plan_terminal_bench_campaign.execute_in_process(
+        instance=instance,
+        run_config=_planner_config(
+            tmp_path,
+            repetitions=1,
+            task_selection={"mode": "selected", "ids": ["task-a"]},
+            dry_run=False,
+        ),
+    )
+    assert planner.success
+    request = terminal_bench_worker_pool_sensor.evaluate_tick(
+        dg.build_sensor_context(instance=instance)
+    ).run_requests[0]
+
+    child = terminal_bench_worker_pool_combination.execute_in_process(
+        instance=instance,
+        run_config=request.run_config,
+        tags=request.tags,
+    )
+
+    assert child.success
+    run = instance.get_run_by_id(child.run_id)
+    assert run is not None
+    assert run.status == dg.DagsterRunStatus.SUCCESS
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT state, outcome FROM benchmark_task_executions"
+        ).fetchone() == ("completed", "failed")
+        result = connection.execute(
+            """
+            SELECT status, execution_state, outcome, passed, reward
+            FROM rollout_results
+            """
+        ).fetchone()
+    assert result == ("failed", "completed", "failed", 0, 0.0)
+
+
 def test_dagster_failure_reconciliation_terminates_unreported_tasks(
     monkeypatch, tmp_path: Path
 ) -> None:

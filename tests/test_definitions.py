@@ -421,8 +421,9 @@ def test_hard_failure_is_persisted_immediately(tmp_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         stored = connection.execute(
             """
-            SELECT reasoning_effort, harness_version, task_id, status, passed, error_type,
-                   error_message, runtime_seconds
+            SELECT reasoning_effort, harness_version, task_id, status,
+                   execution_state, outcome, passed, error_type, error_message,
+                   runtime_seconds
             FROM rollout_results
             """
         ).fetchone()
@@ -431,6 +432,8 @@ def test_hard_failure_is_persisted_immediately(tmp_path: Path) -> None:
         "0.130.0",
         "task-a",
         "error",
+        "error",
+        None,
         0,
         "RuntimeError",
         "worker disconnected",

@@ -874,7 +874,14 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     if spec["dry_run"]:
-        return {**base, "status": "dry_run", "passed": None, "reward": None}
+        return {
+            **base,
+            "status": "dry_run",
+            "execution_state": "completed",
+            "outcome": "dry_run",
+            "passed": None,
+            "reward": None,
+        }
 
     # Cache acquisition is deliberately outside runtime_seconds. On a cold host,
     # concurrent rollout processes serialize on the per-release cache lock; none
@@ -897,6 +904,8 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         **base,
         "trace_id": trace.id,
         "status": "error" if error else "passed" if reward >= 1 else "failed",
+        "execution_state": "error" if error else "completed",
+        "outcome": None if error else "passed" if reward >= 1 else "failed",
         "passed": not error and reward >= 1,
         "reward": reward,
         "rewards": trace.rewards,
@@ -963,6 +972,8 @@ def _hard_failure_row(
         "state_db_path": spec.get("state_db_path"),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "status": "error",
+        "execution_state": "error",
+        "outcome": None,
         "passed": False,
         "reward": None,
         "rewards": {},
@@ -1512,6 +1523,8 @@ def _write_results_db(
                     task_id TEXT NOT NULL,
                     rollout INTEGER NOT NULL,
                     status TEXT NOT NULL,
+                    execution_state TEXT NOT NULL,
+                    outcome TEXT,
                     passed INTEGER,
                     reward REAL,
                     runtime_seconds REAL,
@@ -1577,11 +1590,30 @@ def _write_results_db(
                 "worker_name": "TEXT",
                 "artifact_uri": "TEXT",
                 "reused_result": "INTEGER",
+                "execution_state": "TEXT",
+                "outcome": "TEXT",
             }.items():
                 if column not in existing_columns:
                     connection.execute(
                         f"ALTER TABLE rollout_results ADD COLUMN {column} {column_type}"
                     )
+            connection.execute(
+                """
+                UPDATE rollout_results
+                SET execution_state = CASE
+                    WHEN status = 'error' THEN 'error'
+                    ELSE 'completed'
+                END
+                WHERE execution_state IS NULL
+                """
+            )
+            connection.execute(
+                """
+                UPDATE rollout_results
+                SET outcome = status
+                WHERE outcome IS NULL AND status != 'error'
+                """
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS rollout_results_batch "
                 "ON rollout_results (batch_id)"
@@ -1608,6 +1640,8 @@ def _write_results_db(
                 "task_id",
                 "rollout",
                 "status",
+                "execution_state",
+                "outcome",
                 "passed",
                 "reward",
                 "runtime_seconds",
@@ -1651,6 +1685,17 @@ def _write_results_db(
 
 
 def _database_values(row: dict) -> tuple:
+    execution_state = row.get("execution_state") or (
+        "error" if row.get("status") == "error" else "completed"
+    )
+    outcome = row.get("outcome")
+    if "outcome" not in row and execution_state == "completed":
+        outcome = row.get("status")
+    normalized_row = {
+        **row,
+        "execution_state": execution_state,
+        "outcome": outcome,
+    }
     error = row.get("error")
     error_type = (
         error.get("type") or error.get("kind") or error.get("error_type")
@@ -1676,6 +1721,8 @@ def _database_values(row: dict) -> tuple:
         row["task_id"],
         row["rollout"],
         row["status"],
+        execution_state,
+        outcome,
         None if row.get("passed") is None else int(row["passed"]),
         row.get("reward"),
         row.get("runtime_seconds"),
@@ -1704,7 +1751,7 @@ def _database_values(row: dict) -> tuple:
         row.get("worker_name"),
         row.get("artifact_uri"),
         None if row.get("reused_result") is None else int(row["reused_result"]),
-        json.dumps(row, sort_keys=True),
+        json.dumps(normalized_row, sort_keys=True),
     )
 
 

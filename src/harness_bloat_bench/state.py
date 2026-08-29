@@ -769,9 +769,20 @@ def _recover_persisted_results(
     }
     if "task_execution_id" not in result_columns:
         return
+    execution_state = (
+        "r.execution_state"
+        if "execution_state" in result_columns
+        else "CASE WHEN r.status = 'error' THEN 'error' ELSE 'completed' END"
+    )
+    outcome = (
+        "r.outcome"
+        if "outcome" in result_columns
+        else "CASE WHEN r.status = 'error' THEN NULL ELSE r.status END"
+    )
     rows = connection.execute(
-        """
-        SELECT r.task_execution_id, r.status, r.error_type, r.error_message
+        f"""
+        SELECT r.task_execution_id, {execution_state} AS execution_state,
+               {outcome} AS outcome, r.error_type, r.error_message
         FROM rollout_results r
         JOIN benchmark_task_executions t USING (task_execution_id)
         WHERE t.combination_id = ?
@@ -780,8 +791,6 @@ def _recover_persisted_results(
         (combination_key,),
     ).fetchall()
     for row in rows:
-        state = "error" if row["status"] == "error" else "completed"
-        outcome = None if state == "error" else row["status"]
         connection.execute(
             """
             UPDATE benchmark_task_executions
@@ -790,8 +799,8 @@ def _recover_persisted_results(
             WHERE task_execution_id = ?
             """,
             (
-                state,
-                outcome,
+                row["execution_state"],
+                row["outcome"],
                 row["error_type"],
                 row["error_message"],
                 now,

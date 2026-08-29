@@ -182,8 +182,11 @@ metadata contains the full task and deterministic task-execution IDs.
 The state database distinguishes execution state (`planned`, `queued`,
 `running`, `completed`, `error`, or `cancelled`) from benchmark outcome
 (`passed`, `failed`, or `dry_run`). A scored failure is therefore a completed
-execution, while an infrastructure failure is an execution error. Inspect live
-state, including the exact active task IDs, with:
+execution and the Dagster run remains successful, while an infrastructure
+failure is an execution error and fails Dagster. `rollout_results` preserves the
+same distinction in its `execution_state` and `outcome` columns; the older
+combined `status` column remains for query compatibility. Inspect live state,
+including the exact active task IDs, with:
 
 ```sh
 ./scripts/benchmark-status

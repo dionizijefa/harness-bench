@@ -9,6 +9,72 @@ one Verifiers rollout.
 
 # WARNING HUMANS: README FOR LLMs below
 
+## Durable distributed worker pool (recommended)
+
+The production Dagster control plane runs on `dionizije-server`, not on the
+Mac. Open its private UI from any device signed in to this tailnet:
+
+<http://dionizije-server.tailbcb0dd.ts.net:3210/>
+
+The URL is plain HTTP inside the end-to-end encrypted Tailscale network; port
+3210 is bound only to the server's Tailscale address. It does not require an
+SSH tunnel, and closing the Mac does not stop the UI, scheduler, queued runs,
+or remote worker. For a prettier HTTPS URL, grant the deployment user one-time
+Tailscale Serve permission on the server and redeploy:
+
+```sh
+ssh tailscale 'sudo tailscale set --operator=dionizije'
+./scripts/deploy-worker-pool
+```
+
+The resulting URL is `https://dionizije-server.tailbcb0dd.ts.net/`. The private
+HTTP URL remains the fallback when Serve permission has not been granted.
+
+Deploy or update the control plane with:
+
+```sh
+# Use --initialize-state only for the first migration of a local results DB.
+./scripts/deploy-worker-pool
+./scripts/worker-pool-status
+```
+
+In the remote UI, launch `plan_terminal_bench_worker_pool_campaign`. The
+`terminal_bench_worker_pool_sensor` is kept running by the deployment script;
+it expands the campaign into durable combination runs. The legacy
+`terminal_bench_campaign_sensor` is kept stopped so new work cannot fall back
+to local-process or SSH submission.
+
+The remote server is always an eligible rollout worker. Add this Mac as
+optional capacity in a terminal with:
+
+```sh
+./scripts/dagster-worker
+```
+
+Workers consume from one RabbitMQ queue with prefetch one, so each rollout goes
+to the next free worker. Stopping the Mac worker merely removes that capacity;
+the control plane and server worker continue. The Mac's current Docker VM has
+less capacity than the server, so keep its concurrency at one (the default) and
+only use it for workloads that fit its Docker allocation. Override with
+`HARNESS_BLOAT_LOCAL_WORKER_CONCURRENCY` only after increasing Docker/Colima
+resources.
+
+Dagster run metadata lives in Postgres, step messages in RabbitMQ, compute logs
+and cross-worker values in MinIO, and benchmark state in the server-side SQLite
+database. Control-plane containers reach those services over the private Docker
+network; the host-networked rollout worker uses loopback-only bindings. A
+Tailscale outage therefore only hides the UI and disconnects optional external
+workers; the server control plane and server worker keep running.
+Rollout steps use late acknowledgement and worker-loss requeueing.
+Completed logical task results are cached by deterministic task-execution ID,
+so a recovered run can reuse completed model work. This provides durable
+at-least-once execution with idempotent completed results; no distributed
+system can promise literal exactly-once execution during every possible
+network partition.
+
+The eight-task, no-model-call routing smoke test is checked in at
+`configs/campaign-worker-pool-canary.yaml`.
+
 ## Run
 
 ```sh

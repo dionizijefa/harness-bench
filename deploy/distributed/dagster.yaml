@@ -1,0 +1,75 @@
+telemetry:
+  enabled: false
+
+storage:
+  postgres:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+compute_logs:
+  module: dagster_aws.s3.compute_log_manager
+  class: S3ComputeLogManager
+  config:
+    bucket:
+      env: HARNESS_BLOAT_OBJECT_STORE_BUCKET
+    endpoint_url:
+      env: HARNESS_BLOAT_OBJECT_STORE_ENDPOINT
+    prefix: dagster-compute-logs
+    region: us-east-1
+    upload_interval: 30
+    use_ssl: false
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 10
+    tag_concurrency_limits:
+      - key: harness_bloat/run_type
+        value: full
+        limit: 1
+
+run_launcher:
+  module: dagster_docker
+  class: DockerRunLauncher
+  config:
+    image: harness-bench-dagster:1.13.13
+    network: harness-bench-dagster_default
+    env_vars:
+      - AWS_ACCESS_KEY_ID
+      - AWS_DEFAULT_REGION
+      - AWS_EC2_METADATA_DISABLED
+      - AWS_SECRET_ACCESS_KEY
+      - DAGSTER_CELERY_BACKEND_URL
+      - DAGSTER_CELERY_BROKER_URL
+      - DAGSTER_HOME
+      - DAGSTER_POSTGRES_URL
+      - HARNESS_BLOAT_CACHE_DIR
+      - HARNESS_BLOAT_OBJECT_STORE_BUCKET
+      - HARNESS_BLOAT_OBJECT_STORE_ENDPOINT
+      - HARNESS_BLOAT_STATE_DB
+      - HOME
+      - PYTHONPATH
+    container_kwargs:
+      auto_remove: true
+      init: true
+      user: "1000:1000"
+      volumes:
+        - /home/dionizije/harness-bloat-bench:/home/dionizije/harness-bloat-bench
+      working_dir: /home/dionizije/harness-bloat-bench
+
+run_monitoring:
+  enabled: true
+  poll_interval_seconds: 30
+
+run_retries:
+  enabled: true
+  max_retries: 2
+  retry_on_asset_or_op_failure: false
+
+code_servers:
+  local_startup_timeout: 360
+
+sensors:
+  use_threads: true
+  num_workers: 4

@@ -1,0 +1,26 @@
+ops:
+  plan_campaign:
+    config:
+      campaign_id: worker-pool-canary-2026-08-26-c
+      batch_id: worker-pool-canary
+      models: [dry-run-model]
+      harnesses:
+        - id: codex_agent
+          version: 0.137.0
+      repetitions: 1
+      task_selection:
+        mode: selected
+        ids:
+          - adaptive-rejection-sampler
+          - bn-fit-modify
+          - break-filter-js-from-html
+          - build-cython-ext
+          - build-pmars
+          - caffe-cifar-10
+          - cancel-async-tasks
+          - circuit-fibsqrt
+      output_dir: outputs/worker-pool-canary
+      run_type: test
+      dry_run: true
+      remote: null
+      combination_max_concurrent: 8

@@ -1,0 +1,397 @@
+#!/usr/bin/env -S uv run python
+"""Deploy the durable Dagster control plane and remote rollout worker."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import secrets
+import shlex
+import sqlite3
+import subprocess
+import tempfile
+from pathlib import Path
+from urllib.parse import quote
+
+
+def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def output(command: list[str]) -> str:
+    return subprocess.check_output(command, text=True).strip()
+
+
+def parse_env(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def local_secret(repo_root: Path, name: str) -> str | None:
+    value = os.environ.get(name)
+    if value:
+        return value
+    env_path = repo_root / ".env"
+    if env_path.is_file():
+        return parse_env(env_path.read_text(encoding="utf-8")).get(name)
+    return None
+
+
+def remote_output(host: str, command: str) -> str:
+    return output(["ssh", "--", host, command])
+
+
+def initialize_remote_state(
+    repo_root: Path, host: str, project_dir: str
+) -> None:
+    source_path = repo_root / "outputs" / "results.sqlite"
+    if not source_path.is_file():
+        raise SystemExit(f"state database does not exist: {source_path}")
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite") as snapshot:
+        source = sqlite3.connect(source_path)
+        target = sqlite3.connect(snapshot.name)
+        source.backup(target)
+        target.close()
+        source.close()
+        run(
+            [
+                "rsync",
+                "-az",
+                snapshot.name,
+                f"{host}:{project_dir}/outputs/results.sqlite.initializing",
+            ]
+        )
+
+    migration = r'''
+import json
+import datetime as dt
+import sqlite3
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1])
+staged = project / "outputs" / "results.sqlite.initializing"
+target = project / "outputs" / "results.sqlite"
+if target.exists():
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = target.with_name(f"results.sqlite.pre-distributed-{stamp}.bak")
+    old = sqlite3.connect(target)
+    saved = sqlite3.connect(backup)
+    old.backup(saved)
+    saved.close()
+    old.close()
+staged.replace(target)
+for suffix in ("-wal", "-shm"):
+    target.with_name(target.name + suffix).unlink(missing_ok=True)
+remote_state = str(target)
+connection = sqlite3.connect(target)
+with connection:
+    rows = connection.execute(
+        "SELECT combination_id, run_config_json FROM benchmark_combinations"
+    ).fetchall()
+    for combination_id, raw in rows:
+        config = json.loads(raw)
+        child = config["ops"]["plan_task_executions"]["config"]
+        child["state_db_path"] = remote_state
+        child["remote"] = None
+        connection.execute(
+            "UPDATE benchmark_combinations SET run_config_json = ? "
+            "WHERE combination_id = ?",
+            (json.dumps(config, sort_keys=True), combination_id),
+        )
+    connection.execute(
+        """
+        UPDATE benchmark_combinations
+        SET state = 'queued', dagster_run_id = 'migration-hold', updated_at = datetime('now')
+        WHERE state NOT IN ('completed', 'error', 'cancelled')
+        """
+    )
+    connection.execute(
+        """
+        UPDATE benchmark_task_executions
+        SET state = CASE
+                WHEN state IN ('completed', 'error', 'timed_out', 'cancelled') THEN state
+                ELSE 'queued'
+            END,
+            dagster_run_id = CASE
+                WHEN state IN ('completed', 'error', 'timed_out', 'cancelled') THEN dagster_run_id
+                ELSE NULL
+            END,
+            dagster_step_key = CASE
+                WHEN state IN ('completed', 'error', 'timed_out', 'cancelled') THEN dagster_step_key
+                ELSE NULL
+            END,
+            remote_job_id = CASE
+                WHEN state IN ('completed', 'error', 'timed_out', 'cancelled') THEN remote_job_id
+                ELSE NULL
+            END,
+            updated_at = datetime('now')
+        WHERE state NOT IN ('completed', 'error', 'timed_out', 'cancelled')
+        """
+    )
+connection.close()
+target.chmod(0o600)
+'''
+    run(
+        ["ssh", "--", host, "python3", "-", project_dir],
+        input=migration,
+        text=True,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="tailscale")
+    parser.add_argument(
+        "--project-dir", default="/home/dionizije/harness-bloat-bench"
+    )
+    parser.add_argument(
+        "--initialize-state",
+        action="store_true",
+        help="Copy the local campaign database and hold unfinished combinations for a canary.",
+    )
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parent.parent
+    host = args.host
+    project_dir = args.project_dir.rstrip("/")
+    run(["ssh", "--", host, "true"])
+
+    run(["ssh", "--", host, "mkdir", "-p", project_dir])
+    run(
+        [
+            "rsync",
+            "-az",
+            "--delete",
+            "--exclude",
+            ".git",
+            "--exclude",
+            ".venv",
+            "--exclude",
+            ".dagster",
+            "--exclude",
+            ".env*",
+            "--exclude",
+            ".harness-cache",
+            "--exclude",
+            ".remote-jobs",
+            "--exclude",
+            ".worker-home*",
+            "--exclude",
+            ".pytest_cache",
+            "--exclude",
+            "__pycache__",
+            "--exclude",
+            "outputs",
+            f"{repo_root}/",
+            f"{host}:{project_dir}/",
+        ]
+    )
+
+    existing_text = remote_output(
+        host,
+        f"test ! -f {shlex.quote(project_dir + '/.dagster/distributed.env')} || "
+        f"cat {shlex.quote(project_dir + '/.dagster/distributed.env')}",
+    )
+    existing = parse_env(existing_text)
+    tailscale_ip = remote_output(host, "tailscale ip -4 | sed -n '1p'")
+    tailscale_dns = remote_output(
+        host,
+        "tailscale status --json | python3 -c "
+        + shlex.quote(
+            "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))"
+        ),
+    )
+    host_uid = remote_output(host, "id -u")
+    host_gid = remote_output(host, "id -g")
+    docker_gid = remote_output(host, "stat -c %g /var/run/docker.sock")
+
+    postgres_user = existing.get("POSTGRES_USER", "harness")
+    postgres_password = existing.get("POSTGRES_PASSWORD", secrets.token_hex(24))
+    postgres_db = existing.get("POSTGRES_DB", "dagster")
+    rabbit_user = existing.get("RABBITMQ_USER", "harness")
+    rabbit_password = existing.get("RABBITMQ_PASSWORD", secrets.token_hex(24))
+    minio_user = existing.get("MINIO_ROOT_USER", "harnessminio")
+    minio_password = existing.get("MINIO_ROOT_PASSWORD", secrets.token_hex(24))
+    bucket = existing.get("HARNESS_BLOAT_OBJECT_STORE_BUCKET", "harness-bench")
+
+    pg_user_url = quote(postgres_user, safe="")
+    pg_password_url = quote(postgres_password, safe="")
+    rabbit_user_url = quote(rabbit_user, safe="")
+    rabbit_password_url = quote(rabbit_password, safe="")
+    postgres_url = (
+        f"postgresql://{pg_user_url}:{pg_password_url}@{tailscale_ip}:5432/{postgres_db}"
+    )
+    internal_postgres_url = (
+        f"postgresql://{pg_user_url}:{pg_password_url}@postgres:5432/{postgres_db}"
+    )
+    internal_rabbit_url = (
+        f"amqp://{rabbit_user_url}:{rabbit_password_url}@rabbitmq:5672//"
+    )
+    host_postgres_url = (
+        f"postgresql://{pg_user_url}:{pg_password_url}@127.0.0.1:5432/{postgres_db}"
+    )
+    host_rabbit_url = (
+        f"amqp://{rabbit_user_url}:{rabbit_password_url}@127.0.0.1:5672//"
+    )
+    values = {
+        "AWS_ACCESS_KEY_ID": minio_user,
+        "AWS_DEFAULT_REGION": "us-east-1",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_SECRET_ACCESS_KEY": minio_password,
+        "DAGSTER_CELERY_BACKEND_URL": f"db+{postgres_url}",
+        "DAGSTER_CELERY_BACKEND_HOST_URL": f"db+{host_postgres_url}",
+        "DAGSTER_CELERY_BACKEND_INTERNAL_URL": f"db+{internal_postgres_url}",
+        "DAGSTER_CELERY_BROKER_URL": (
+            f"amqp://{rabbit_user_url}:{rabbit_password_url}@{tailscale_ip}:5672//"
+        ),
+        "DAGSTER_CELERY_BROKER_INTERNAL_URL": internal_rabbit_url,
+        "DAGSTER_CELERY_BROKER_HOST_URL": host_rabbit_url,
+        "DAGSTER_POSTGRES_HOST_URL": host_postgres_url,
+        "DAGSTER_POSTGRES_INTERNAL_URL": internal_postgres_url,
+        "DAGSTER_POSTGRES_URL": postgres_url,
+        "DOCKER_GID": docker_gid,
+        "HARNESS_BLOAT_DISTRIBUTED_ENV_FILE": (
+            f"{project_dir}/.dagster/distributed.env"
+        ),
+        "HARNESS_BLOAT_OBJECT_STORE_BUCKET": bucket,
+        "HARNESS_BLOAT_OBJECT_STORE_ENDPOINT": f"http://{tailscale_ip}:9000",
+        "HARNESS_BLOAT_OBJECT_STORE_HOST_ENDPOINT": "http://127.0.0.1:9000",
+        "HARNESS_BLOAT_OBJECT_STORE_INTERNAL_ENDPOINT": "http://minio:9000",
+        "HARNESS_BLOAT_PROJECT_DIR": project_dir,
+        "HOST_GID": host_gid,
+        "HOST_UID": host_uid,
+        "MINIO_ROOT_PASSWORD": minio_password,
+        "MINIO_ROOT_USER": minio_user,
+        "POSTGRES_DB": postgres_db,
+        "POSTGRES_PASSWORD": postgres_password,
+        "POSTGRES_USER": postgres_user,
+        "RABBITMQ_PASSWORD": rabbit_password,
+        "RABBITMQ_USER": rabbit_user,
+        "REMOTE_ROLLOUT_CONCURRENCY": existing.get(
+            "REMOTE_ROLLOUT_CONCURRENCY", "6"
+        ),
+        "TAILSCALE_IP": tailscale_ip,
+    }
+    if api_key := local_secret(repo_root, "OPENROUTER_API_KEY"):
+        values["OPENROUTER_API_KEY"] = api_key
+    env_text = "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
+
+    writer = (
+        "import os,sys; from pathlib import Path; "
+        "p=Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); "
+        "p.write_text(sys.stdin.read()); os.chmod(p,0o600)"
+    )
+    remote_env = f"{project_dir}/.dagster/distributed.env"
+    run(
+        [
+            "ssh",
+            "--",
+            host,
+            f"python3 -c {shlex.quote(writer)} {shlex.quote(remote_env)}",
+        ],
+        input=env_text,
+        text=True,
+    )
+
+    local_worker_keys = {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_DEFAULT_REGION",
+        "AWS_EC2_METADATA_DISABLED",
+        "AWS_SECRET_ACCESS_KEY",
+        "DAGSTER_CELERY_BACKEND_URL",
+        "DAGSTER_CELERY_BROKER_URL",
+        "DAGSTER_POSTGRES_URL",
+        "HARNESS_BLOAT_OBJECT_STORE_BUCKET",
+        "HARNESS_BLOAT_OBJECT_STORE_ENDPOINT",
+    }
+    local_worker_env = "".join(
+        f"{key}={values[key]}\n" for key in sorted(local_worker_keys)
+    )
+    local_worker_path = repo_root / ".dagster" / "distributed-worker.env"
+    local_worker_path.parent.mkdir(exist_ok=True)
+    local_worker_path.write_text(local_worker_env, encoding="utf-8")
+    local_worker_path.chmod(0o600)
+
+    remote_setup = (
+        f"cd {shlex.quote(project_dir)} && "
+        "mkdir -p .dagster/distributed .worker-home outputs && "
+        "cp deploy/distributed/dagster.yaml .dagster/distributed/dagster.yaml"
+    )
+    run(["ssh", "--", host, remote_setup])
+    if args.initialize_state:
+        # An explicit re-initialization is safe to repeat: pause every process
+        # that can open the SQLite campaign database, preserve the prior remote
+        # database, and only then atomically install the local snapshot.
+        stop_application = (
+            f"cd {shlex.quote(project_dir)} && "
+            "docker compose --env-file .dagster/distributed.env "
+            "-f deploy/distributed/compose.yaml stop "
+            "daemon webserver code-server control-worker rollout-worker "
+            ">/dev/null 2>&1 || true"
+        )
+        run(["ssh", "--", host, stop_application])
+        initialize_remote_state(repo_root, host, project_dir)
+
+    compose_build = (
+        f"cd {shlex.quote(project_dir)} && "
+        "docker compose --env-file .dagster/distributed.env "
+        "-f deploy/distributed/compose.yaml build --provenance=false code-server"
+    )
+    run(["ssh", "--", host, compose_build])
+    compose = (
+        f"cd {shlex.quote(project_dir)} && "
+        "docker compose --env-file .dagster/distributed.env "
+        "-f deploy/distributed/compose.yaml up --detach --remove-orphans"
+    )
+    run(["ssh", "--", host, compose])
+    code_server_ready = (
+        f"cd {shlex.quote(project_dir)} && "
+        "for attempt in $(seq 1 60); do "
+        "docker compose --env-file .dagster/distributed.env "
+        "-f deploy/distributed/compose.yaml exec -T code-server "
+        "python -m dagster sensor list --grpc-host code-server --grpc-port 4000 "
+        ">/dev/null 2>&1 && exit 0; "
+        "sleep 2; "
+        "done; "
+        "echo 'Dagster code server did not become ready within 120 seconds' >&2; "
+        "exit 1"
+    )
+    run(["ssh", "--", host, code_server_ready])
+    sensor_control = (
+        f"cd {shlex.quote(project_dir)} && "
+        "docker compose --env-file .dagster/distributed.env "
+        "-f deploy/distributed/compose.yaml exec -T code-server "
+        "python -m dagster sensor stop terminal_bench_campaign_sensor "
+        "--grpc-host code-server --grpc-port 4000 && "
+        "docker compose --env-file .dagster/distributed.env "
+        "-f deploy/distributed/compose.yaml exec -T code-server "
+        "python -m dagster sensor start terminal_bench_worker_pool_sensor "
+        "--grpc-host code-server --grpc-port 4000"
+    )
+    run(["ssh", "--", host, sensor_control])
+    serve = subprocess.run(
+        ["ssh", "--", host, "tailscale serve --bg 3210"],
+        text=True,
+        capture_output=True,
+    )
+    print("Worker pool deployed. Durable sensor started; legacy sensor stopped.")
+    if serve.returncode == 0:
+        print(f"UI: https://{tailscale_dns}/")
+    else:
+        print(f"UI: http://{tailscale_dns}:3210/")
+        print(
+            "Private HTTPS is optional; grant Tailscale Serve access once with "
+            f"'sudo tailscale set --operator={remote_output(host, 'id -un')}'."
+        )
+
+
+if __name__ == "__main__":
+    main()

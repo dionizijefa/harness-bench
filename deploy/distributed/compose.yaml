@@ -1,0 +1,237 @@
+name: harness-bench-dagster
+
+x-dagster-common: &dagster-common
+  image: harness-bench-dagster:1.13.13
+  env_file:
+    - ${HARNESS_BLOAT_DISTRIBUTED_ENV_FILE:-../../.dagster/distributed.env}
+  environment:
+    DAGSTER_CELERY_BACKEND_URL: ${DAGSTER_CELERY_BACKEND_INTERNAL_URL}
+    DAGSTER_CELERY_BROKER_URL: ${DAGSTER_CELERY_BROKER_INTERNAL_URL}
+    DAGSTER_HOME: ${HARNESS_BLOAT_PROJECT_DIR}/.dagster/distributed
+    DAGSTER_POSTGRES_URL: ${DAGSTER_POSTGRES_INTERNAL_URL}
+    HARNESS_BLOAT_CACHE_DIR: ${HARNESS_BLOAT_PROJECT_DIR}/.harness-cache
+    HARNESS_BLOAT_OBJECT_STORE_ENDPOINT: ${HARNESS_BLOAT_OBJECT_STORE_INTERNAL_ENDPOINT}
+    HARNESS_BLOAT_STATE_DB: ${HARNESS_BLOAT_PROJECT_DIR}/outputs/results.sqlite
+    HOME: ${HARNESS_BLOAT_PROJECT_DIR}/.worker-home
+    PYTHONPATH: ${HARNESS_BLOAT_PROJECT_DIR}/src
+    TZ: UTC
+  working_dir: ${HARNESS_BLOAT_PROJECT_DIR}
+  user: ${HOST_UID}:${HOST_GID}
+  volumes:
+    - ${HARNESS_BLOAT_PROJECT_DIR}:${HARNESS_BLOAT_PROJECT_DIR}
+  init: true
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "${TAILSCALE_IP}:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine@sha256:5ae1b436f98ed304168a55a90280dadfb0f1bfe5736d6e2e970e69f7f8fdf5e4
+    hostname: harness-bench-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+      - "${TAILSCALE_IP}:5672:5672"
+      - "${TAILSCALE_IP}:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address :9001
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+      - "${TAILSCALE_IP}:9000:9000"
+      - "${TAILSCALE_IP}:9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      OBJECT_STORE_BUCKET: ${HARNESS_BLOAT_OBJECT_STORE_BUCKET}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
+        do sleep 2; done;
+        mc mb --ignore-existing "local/$${OBJECT_STORE_BUCKET}"
+    restart: "no"
+
+  code-server:
+    <<: *dagster-common
+    build:
+      context: ../..
+      dockerfile: deploy/distributed/Dockerfile
+      provenance: false
+    command:
+      - dagster
+      - code-server
+      - start
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
+      - --module-name
+      - harness_bloat_bench.definitions
+    expose:
+      - "4000"
+
+  webserver:
+    <<: *dagster-common
+    command:
+      - dagster-webserver
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3210"
+      - --workspace
+      - deploy/distributed/workspace.yaml
+    ports:
+      # Bind only to the server's Tailscale address. This remains private even
+      # when Tailscale Serve has not been delegated to the deployment user.
+      - "${TAILSCALE_IP}:3210:3210"
+    group_add:
+      - ${DOCKER_GID}
+    volumes:
+      - ${HARNESS_BLOAT_PROJECT_DIR}:${HARNESS_BLOAT_PROJECT_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      code-server:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  daemon:
+    <<: *dagster-common
+    command:
+      - dagster-daemon
+      - run
+      - --workspace
+      - deploy/distributed/workspace.yaml
+    depends_on:
+      code-server:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    group_add:
+      - ${DOCKER_GID}
+    volumes:
+      - ${HARNESS_BLOAT_PROJECT_DIR}:${HARNESS_BLOAT_PROJECT_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  control-worker:
+    <<: *dagster-common
+    command:
+      - python
+      - -m
+      - celery
+      - --app
+      - harness_bloat_bench.celery_app:app
+      - worker
+      - --queues
+      - dagster-control
+      - --hostname
+      - control-worker@%h
+      - --concurrency
+      - "8"
+      - --loglevel
+      - INFO
+
+  rollout-worker:
+    <<: *dagster-common
+    # Verifiers' Docker runtime starts task containers with host networking and
+    # advertises its interception server on 127.0.0.1. The worker must share
+    # that same host namespace; a Compose bridge would make the two loopbacks
+    # unrelated and every harness model request would fail to connect.
+    network_mode: host
+    environment:
+      DAGSTER_CELERY_BACKEND_URL: ${DAGSTER_CELERY_BACKEND_HOST_URL}
+      DAGSTER_CELERY_BROKER_URL: ${DAGSTER_CELERY_BROKER_HOST_URL}
+      DAGSTER_HOME: ${HARNESS_BLOAT_PROJECT_DIR}/.dagster/distributed
+      DAGSTER_POSTGRES_URL: ${DAGSTER_POSTGRES_HOST_URL}
+      HARNESS_BLOAT_CACHE_DIR: ${HARNESS_BLOAT_PROJECT_DIR}/.harness-cache
+      HARNESS_BLOAT_OBJECT_STORE_ENDPOINT: ${HARNESS_BLOAT_OBJECT_STORE_HOST_ENDPOINT}
+      HARNESS_BLOAT_STATE_DB: ${HARNESS_BLOAT_PROJECT_DIR}/outputs/results.sqlite
+      HARNESS_BLOAT_WORKER_NAME: dionizije-server
+      HOME: ${HARNESS_BLOAT_PROJECT_DIR}/.worker-home
+      PYTHONPATH: ${HARNESS_BLOAT_PROJECT_DIR}/src
+      TZ: UTC
+    command:
+      - python
+      - -m
+      - celery
+      - --app
+      - harness_bloat_bench.celery_app:app
+      - worker
+      - --queues
+      - dagster-rollouts
+      - --hostname
+      - rollout-worker@%h
+      - --concurrency
+      - ${REMOTE_ROLLOUT_CONCURRENCY:-6}
+      - --prefetch-multiplier
+      - "1"
+      - --loglevel
+      - INFO
+    group_add:
+      - ${DOCKER_GID}
+    volumes:
+      - ${HARNESS_BLOAT_PROJECT_DIR}:${HARNESS_BLOAT_PROJECT_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  minio-data:
+  postgres-data:
+  rabbitmq-data:

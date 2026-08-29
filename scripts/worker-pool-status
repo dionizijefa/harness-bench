@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+host="${HARNESS_BLOAT_CONTROL_HOST:-tailscale}"
+project_dir="${HARNESS_BLOAT_REMOTE_PROJECT_DIR:-/home/dionizije/harness-bloat-bench}"
+
+printf 'Dagster UI: http://dionizije-server.tailbcb0dd.ts.net:3210/\n\n'
+ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml ps"
+printf '\nSensors:\n'
+ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml exec -T code-server python -m dagster sensor list --grpc-host code-server --grpc-port 4000"
+printf '\nWorkers:\n'
+ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml exec -T code-server python -m celery --app harness_bloat_bench.celery_app:app inspect ping --timeout 5"

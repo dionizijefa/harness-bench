@@ -9,6 +9,7 @@ import yaml
 import harness_bloat_bench.definitions as definitions
 from harness_bloat_bench.definitions import (
     CAMPAIGN_ID_TAG,
+    CELERY_QUEUE_TAG,
     COMBINATION_ID_TAG,
     HARNESS_TAG,
     REPETITION_TAG,
@@ -21,6 +22,8 @@ from harness_bloat_bench.definitions import (
     plan_terminal_bench_campaign,
     terminal_bench_campaign_sensor,
     terminal_bench_combination,
+    terminal_bench_worker_pool_combination,
+    terminal_bench_worker_pool_sensor,
 )
 from harness_bloat_bench.state import (
     bind_combination_run,
@@ -49,7 +52,11 @@ def _planner_config(tmp_path: Path, **overrides) -> dict:
 
 def test_checked_in_campaign_configs_validate() -> None:
     project_root = Path(__file__).parents[1]
-    for filename in ("campaign-dry-run.yaml", "campaign-remote.example.yaml"):
+    for filename in (
+        "campaign-dry-run.yaml",
+        "campaign-remote.example.yaml",
+        "campaign-worker-pool-canary.yaml",
+    ):
         config = yaml.safe_load((project_root / "configs" / filename).read_text())
         dg.validate_run_config(plan_terminal_bench_campaign, config)
 
@@ -242,6 +249,43 @@ def test_sensor_launches_one_run_per_combination_and_tasks_finish_independently(
         assert connection.execute(
             "SELECT COUNT(*) FROM rollout_results"
         ).fetchone() == (8,)
+
+
+def test_worker_pool_sensor_routes_compute_and_centralizes_sqlite_writes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / "state.sqlite"
+    monkeypatch.setenv("HARNESS_BLOAT_STATE_DB", str(database_path))
+    instance = dg.DagsterInstance.ephemeral()
+    planner = plan_terminal_bench_campaign.execute_in_process(
+        instance=instance,
+        run_config=_planner_config(tmp_path, repetitions=1),
+    )
+    assert planner.success
+
+    tick = terminal_bench_worker_pool_sensor.evaluate_tick(
+        dg.build_sensor_context(instance=instance)
+    )
+    request = tick.run_requests[0]
+    assert "execution" not in request.run_config
+    assert CELERY_QUEUE_TAG not in request.tags
+
+    child = terminal_bench_worker_pool_combination.execute_in_process(
+        instance=instance,
+        run_config=request.run_config,
+        tags=request.tags,
+    )
+    assert child.success
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT state, outcome, COUNT(*) FROM benchmark_task_executions "
+            "GROUP BY state, outcome"
+        ).fetchall() == [("completed", "dry_run", 2)]
+        rows = connection.execute(
+            "SELECT worker_name, reused_result FROM rollout_results"
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(worker and reused == 0 for worker, reused in rows)
 
 
 def test_dagster_failure_reconciliation_terminates_unreported_tasks(

@@ -193,6 +193,11 @@ test -f {shlex.quote(DEEPSEEK_HARNESS_CLI)}
             "headless",
             "--patch",
             patch_path,
+            # dsh parses once in its outer launcher and again in the headless
+            # profile. Each parser consumes one option terminator, so two are
+            # required for task prompts that begin with a dash.
+            "--",
+            "--",
             prompt,
         ]
         home = f"{state_dir}/home"

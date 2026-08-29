@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "dagster==1.13.13",
+    "dagster-aws==0.29.13",
+    "dagster-celery==0.29.13",
+    "dagster-docker==0.29.13",
+    "dagster-postgres==0.29.13",
     "dagster-webserver==1.13.13",
     # Verifiers 0.2.0 depends on preview releases of these two packages. Listing
     # them directly lets uv admit only those previews instead of all prereleases.

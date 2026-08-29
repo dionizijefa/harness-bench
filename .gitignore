@@ -8,6 +8,7 @@
 .dagster/
 .harness-cache/
 .remote-jobs/
+.worker-home*/
 __pycache__/
 *.py[cod]
 outputs/

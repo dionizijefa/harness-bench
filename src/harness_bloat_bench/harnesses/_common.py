@@ -110,3 +110,27 @@ def openai_compat_model_config(
 
 def json_bytes(value: object) -> bytes:
     return json.dumps(value, indent=2, sort_keys=True).encode()
+
+
+async def run_program_with_stdin(
+    runtime: Runtime,
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    stdin_path: str,
+    stdin: str,
+):
+    """Run a harness with exact UTF-8 stdin through Runtime's argv-only API."""
+
+    await runtime.write(stdin_path, stdin.encode())
+    return await runtime.run_program(
+        [
+            "sh",
+            "-c",
+            'input="$1"; shift; exec "$@" < "$input"',
+            "vf-stdin",
+            stdin_path,
+            *argv,
+        ],
+        env,
+    )

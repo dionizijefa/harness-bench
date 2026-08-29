@@ -24,6 +24,7 @@ from ._common import (
     openai_compat_model_config,
     release_version,
     run_install,
+    run_program_with_stdin,
     runtime_linux_arch,
     shell_assignment,
 )
@@ -143,7 +144,7 @@ test -f {shlex.quote(PI_AGENT_CLI)}
             argv += ["--exclude-tools", ",".join(self.config.disabled_tools)]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
-        argv += ["--print", prompt]
+        argv += ["--print"]
 
         env = {
             **self.config.resolved_env,
@@ -153,7 +154,16 @@ test -f {shlex.quote(PI_AGENT_CLI)}
             "PI_OFFLINE": "1",
             "PI_TELEMETRY": "0",
         }
-        return await runtime.run_program(argv, env)
+        # Pi 0.84 treats a positional beginning with '-' as an option and does
+        # not implement an option terminator. Its supported stdin path preserves
+        # every task prompt byte-for-byte and avoids that parser ambiguity.
+        return await run_program_with_stdin(
+            runtime,
+            argv,
+            env,
+            stdin_path=f"{state_dir}/prompt.txt",
+            stdin=prompt,
+        )
 
 
 __all__ = ["PiAgentHarness", "PiAgentHarnessConfig"]

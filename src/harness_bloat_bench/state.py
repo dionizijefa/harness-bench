@@ -326,6 +326,27 @@ def launchable_combinations(path: Path, limit: int = 100) -> list[dict[str, Any]
         connection.close()
 
 
+def nonterminal_task_ids(path: Path, combination_key: str) -> list[str]:
+    """Return only logical tasks that still need execution for a combination."""
+
+    connection = _connect(path)
+    try:
+        _ensure_state_schema(connection)
+        rows = connection.execute(
+            """
+            SELECT task_id
+            FROM benchmark_task_executions
+            WHERE combination_id = ?
+              AND state NOT IN ('completed', 'error', 'timed_out', 'cancelled')
+            ORDER BY task_id
+            """,
+            (combination_key,),
+        ).fetchall()
+        return [str(row["task_id"]) for row in rows]
+    finally:
+        connection.close()
+
+
 def validate_combination_config(
     path: Path, combination_key: str, child_config: Mapping[str, Any]
 ) -> None:

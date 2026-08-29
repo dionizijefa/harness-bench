@@ -25,6 +25,7 @@ from ._common import (
     openai_compat_model_config,
     release_version,
     run_install,
+    run_program_with_stdin,
     runtime_linux_arch,
     shell_assignment,
 )
@@ -184,7 +185,7 @@ LD_LIBRARY_PATH={shlex.quote(PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR)} \
         ]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
-        argv += ["--print", prompt]
+        argv += ["--print"]
 
         env = {
             **self.config.resolved_env,
@@ -196,7 +197,13 @@ LD_LIBRARY_PATH={shlex.quote(PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR)} \
             "PI_RLM_RUNTIME_PYTHON": PI_RLM_RUNTIME_KERNEL_PYTHON,
             "PI_TELEMETRY": "0",
         }
-        return await runtime.run_program(argv, env)
+        return await run_program_with_stdin(
+            runtime,
+            argv,
+            env,
+            stdin_path=f"{state_dir}/prompt.txt",
+            stdin=prompt,
+        )
 
 
 __all__ = ["PiRlmRuntimeHarness", "PiRlmRuntimeHarnessConfig"]

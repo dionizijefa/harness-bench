@@ -423,7 +423,7 @@ def test_deepseek_harness_uses_headless_profile_and_interception_patch() -> None
     asyncio.run(
         harness.launch(
             context(),
-            trace(),
+            trace(prompt="- Fix the tests"),
             runtime,
             "http://127.0.0.1:9000/v1",
             "session-secret",
@@ -448,7 +448,7 @@ def test_deepseek_harness_uses_headless_profile_and_interception_patch() -> None
 
     assert argv[:2] == [DEEPSEEK_HARNESS_NODE_BIN, DEEPSEEK_HARNESS_CLI]
     assert argv[2:6] == ["--profile", "headless", "--patch", patch_path]
-    assert argv[-1] == "Fix the tests"
+    assert argv[-3:] == ["--", "--", "- Fix the tests"]
     assert provider == {
         "api": "openai-completions",
         "apiKeyEnv": "VF_INTERCEPT_KEY",
@@ -498,7 +498,7 @@ def test_pi_launch_uses_print_mode_and_isolated_model_registry() -> None:
     asyncio.run(
         harness.launch(
             context(),
-            trace(),
+            trace(prompt="- Fix the tests"),
             runtime,
             "http://127.0.0.1:9000/v1",
             "session-secret",
@@ -510,13 +510,23 @@ def test_pi_launch_uses_print_mode_and_isolated_model_registry() -> None:
     argv, env = runtime.program
     models_path = "/tmp/vf-pi-agent-state-trace-123/agent/models.json"
     provider = json.loads(runtime.writes[models_path])["providers"]["verifiers"]
-    assert argv[:2] == [PI_AGENT_NODE_BIN, PI_AGENT_CLI]
-    assert argv[argv.index("--provider") + 1] == "verifiers"
-    assert argv[argv.index("--model") + 1] == "model"
-    assert argv[argv.index("--exclude-tools") + 1] == "write,edit"
-    assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
-    assert {"--no-session", "--no-approve", "--offline"}.issubset(argv)
-    assert argv[-2:] == ["--print", "Fix the tests"]
+    prompt_path = "/tmp/vf-pi-agent-state-trace-123/prompt.txt"
+    assert argv[:5] == [
+        "sh",
+        "-c",
+        'input="$1"; shift; exec "$@" < "$input"',
+        "vf-stdin",
+        prompt_path,
+    ]
+    pi_argv = argv[5:]
+    assert pi_argv[:2] == [PI_AGENT_NODE_BIN, PI_AGENT_CLI]
+    assert pi_argv[pi_argv.index("--provider") + 1] == "verifiers"
+    assert pi_argv[pi_argv.index("--model") + 1] == "model"
+    assert pi_argv[pi_argv.index("--exclude-tools") + 1] == "write,edit"
+    assert pi_argv[pi_argv.index("--append-system-prompt") + 1] == "Be precise"
+    assert {"--no-session", "--no-approve", "--offline"}.issubset(pi_argv)
+    assert pi_argv[-1] == "--print"
+    assert runtime.writes[prompt_path] == b"- Fix the tests"
     assert provider == {
         "api": "openai-completions",
         "apiKey": "$VF_INTERCEPT_KEY",
@@ -549,7 +559,7 @@ def test_pi_rlm_runtime_launch_enables_extension_and_prebuilt_kernel() -> None:
     asyncio.run(
         harness.launch(
             context(),
-            trace(),
+            trace(prompt="- Fix the tests"),
             runtime,
             "http://127.0.0.1:9000/v1",
             "session-secret",
@@ -561,12 +571,22 @@ def test_pi_rlm_runtime_launch_enables_extension_and_prebuilt_kernel() -> None:
     argv, env = runtime.program
     models_path = "/tmp/vf-pi-rlm-runtime-state-trace-123/agent/models.json"
     provider = json.loads(runtime.writes[models_path])["providers"]["verifiers"]
-    assert argv[:2] == [PI_RLM_RUNTIME_NODE_BIN, PI_RLM_RUNTIME_PI_CLI]
-    assert argv[argv.index("--extension") + 1] == PI_RLM_RUNTIME_EXTENSION
-    assert "--rlm-runtime" in argv
-    assert argv[argv.index("--rlm-runtime-max-depth") + 1] == "4"
-    assert argv[argv.index("--append-system-prompt") + 1] == "Be precise"
-    assert argv[-2:] == ["--print", "Fix the tests"]
+    prompt_path = "/tmp/vf-pi-rlm-runtime-state-trace-123/prompt.txt"
+    assert argv[:5] == [
+        "sh",
+        "-c",
+        'input="$1"; shift; exec "$@" < "$input"',
+        "vf-stdin",
+        prompt_path,
+    ]
+    pi_argv = argv[5:]
+    assert pi_argv[:2] == [PI_RLM_RUNTIME_NODE_BIN, PI_RLM_RUNTIME_PI_CLI]
+    assert pi_argv[pi_argv.index("--extension") + 1] == PI_RLM_RUNTIME_EXTENSION
+    assert "--rlm-runtime" in pi_argv
+    assert pi_argv[pi_argv.index("--rlm-runtime-max-depth") + 1] == "4"
+    assert pi_argv[pi_argv.index("--append-system-prompt") + 1] == "Be precise"
+    assert pi_argv[-1] == "--print"
+    assert runtime.writes[prompt_path] == b"- Fix the tests"
     assert provider["apiKey"] == "$VF_INTERCEPT_KEY"
     assert env["PI_RLM_RUNTIME_PYTHON"] == PI_RLM_RUNTIME_KERNEL_PYTHON
     assert env["LD_LIBRARY_PATH"] == PI_RLM_RUNTIME_PYTHON_DEPENDENCY_DIR

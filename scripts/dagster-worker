@@ -1,0 +1,76 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+worker_env="$repo_root/.dagster/distributed-worker.env"
+if [ ! -f "$worker_env" ]; then
+    echo "Missing $worker_env; run scripts/deploy-worker-pool first." >&2
+    exit 1
+fi
+
+docker_endpoint=$(docker context inspect --format '{{ (index .Endpoints "docker").Host }}')
+case "$docker_endpoint" in
+    unix://*) ;;
+    *)
+        echo "The local worker requires a Unix-socket Docker context; got $docker_endpoint" >&2
+        exit 1
+        ;;
+esac
+dagster_home="$repo_root/.dagster/distributed-worker"
+worker_home="$repo_root/.worker-home-mac"
+mkdir -p "$dagster_home" "$worker_home" "$repo_root/.harness-cache"
+cp "$repo_root/deploy/distributed/dagster.yaml" "$dagster_home/dagster.yaml"
+
+image="${HARNESS_BLOAT_LOCAL_WORKER_IMAGE:-harness-bench-dagster-local:1.13.13}"
+docker build --quiet \
+    --provenance=false \
+    --file "$repo_root/deploy/distributed/Dockerfile" \
+    --tag "$image" \
+    "$repo_root" >/dev/null
+docker_socket_gid=$(
+    docker run --rm --user 0 \
+        --volume /var/run/docker.sock:/var/run/docker.sock \
+        "$image" stat -c '%g' /var/run/docker.sock
+)
+
+concurrency="${HARNESS_BLOAT_LOCAL_WORKER_CONCURRENCY:-1}"
+worker_name="${HARNESS_BLOAT_WORKER_NAME:-macbook}"
+docker_cpus=$(docker info --format '{{.NCPU}}')
+docker_memory_bytes=$(docker info --format '{{.MemTotal}}')
+docker_memory_gib=$((docker_memory_bytes / 1024 / 1024 / 1024))
+if [ "$docker_cpus" -lt 8 ] || [ "$docker_memory_gib" -lt 18 ]; then
+    echo "Note: local Docker has ${docker_cpus} CPUs and ${docker_memory_gib} GiB;" >&2
+    echo "the default full-run ceiling is 8 CPUs / 18 GiB per rollout." >&2
+    echo "Keep this worker at concurrency 1 and submit only workloads that fit." >&2
+fi
+set -- docker run --rm --init \
+    --name harness-bench-mac-worker \
+    --hostname macbook-worker \
+    --label harness-bench.role=rollout-worker \
+    --user "$(id -u):$(id -g)" \
+    --group-add "$docker_socket_gid" \
+    --env-file "$worker_env" \
+    --env "DAGSTER_HOME=$dagster_home" \
+    --env "HARNESS_BLOAT_CACHE_DIR=$repo_root/.harness-cache" \
+    --env "HARNESS_BLOAT_WORKER_NAME=$worker_name" \
+    --env "HOME=$worker_home" \
+    --env "PYTHONPATH=$repo_root/src" \
+    --env TZ=UTC \
+    --volume "$repo_root:$repo_root" \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    --workdir "$repo_root"
+if [ -f "$repo_root/.env" ]; then
+    set -- "$@" --env-file "$repo_root/.env"
+fi
+set -- "$@" "$image" python -m celery \
+    --app harness_bloat_bench.celery_app:app \
+    worker \
+    --queues dagster-rollouts \
+    --hostname 'mac-rollout-worker@%h' \
+    --concurrency "$concurrency" \
+    --prefetch-multiplier 1 \
+    --loglevel INFO
+exec "$@"

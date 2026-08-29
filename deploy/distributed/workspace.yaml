@@ -1,0 +1,5 @@
+load_from:
+  - grpc_server:
+      host: code-server
+      port: 4000
+      location_name: harness_bloat_bench

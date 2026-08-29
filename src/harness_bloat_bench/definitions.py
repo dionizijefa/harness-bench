@@ -14,12 +14,23 @@ from pathlib import Path
 from typing import Literal
 
 import dagster as dg
+from dagster_aws.s3 import S3PickleIOManager, S3Resource
+from dagster_celery import celery_executor
 from verifiers.v1.cli.eval.runner import run_eval
 from verifiers.v1.configs.eval import EvalConfig
 from verifiers.v1.env import Environment
 from verifiers.v1.tasksets.harbor import HarborConfig, HarborTaskset
 
 from harness_bloat_bench.harness_prefetch import ensure_harness_cached
+from harness_bloat_bench.distributed import (
+    OBJECT_STORE_BUCKET_ENV,
+    OBJECT_STORE_ENDPOINT_ENV,
+    load_cached_result,
+    object_store_enabled,
+    store_completed_result,
+    upload_rollout_artifacts,
+    worker_name,
+)
 from harness_bloat_bench.resource_monitor import (
     consume_resource_usage,
     enable_docker_resource_monitoring,
@@ -36,6 +47,7 @@ from harness_bloat_bench.state import (
     mark_task_running,
     mark_task_terminal,
     new_campaign_id,
+    nonterminal_task_ids,
     reconcile_combination,
     state_database_path,
     task_execution_id,
@@ -94,6 +106,9 @@ COMBINATION_ID_TAG = "harness_bloat/combination_id"
 REPETITION_TAG = "harness_bloat/repetition"
 TASK_SELECTION_TAG = "harness_bloat/task_selection"
 TASK_COUNT_TAG = "harness_bloat/task_count"
+CELERY_QUEUE_TAG = "dagster-celery/queue"
+CONTROL_QUEUE = "dagster-control"
+ROLLOUT_QUEUE = "dagster-rollouts"
 
 # Terminal-Bench tasks that require sending images to the model. Keep these out of
 # every rollout matrix because the benchmark's default text-only models cannot run
@@ -113,6 +128,26 @@ IMAGE_INPUT_TASK_IDS = frozenset(
         "video-processing",
     }
 )
+
+
+def _worker_pool_resource_defs() -> dict[str, object]:
+    """Use local IO for tests and MinIO/S3 for real multi-node execution."""
+
+    if not object_store_enabled():
+        return {}
+    endpoint = os.environ[OBJECT_STORE_ENDPOINT_ENV]
+    s3 = S3Resource(
+        endpoint_url=endpoint,
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        use_ssl=endpoint.startswith("https://"),
+    )
+    return {
+        "io_manager": S3PickleIOManager(
+            s3_resource=s3,
+            s3_bucket=os.environ[OBJECT_STORE_BUCKET_ENV],
+            s3_prefix="dagster-io",
+        )
+    }
 
 
 class HarnessSpec(dg.Config):
@@ -434,7 +469,7 @@ def _task_mapping_key(task_id: str, execution_key: str) -> str:
     return f"{readable[:48]}__{execution_key.rsplit('_', 1)[-1][:10]}"
 
 
-@dg.op
+@dg.op(tags={CELERY_QUEUE_TAG: CONTROL_QUEUE})
 def plan_campaign(context: dg.OpExecutionContext, config: CampaignConfig) -> str:
     """Snapshot a campaign and persist every logical task before launching it."""
 
@@ -573,7 +608,10 @@ def plan_campaign(context: dg.OpExecutionContext, config: CampaignConfig) -> str
     return campaign_key
 
 
-@dg.op(out=dg.DynamicOut(dict))
+@dg.op(
+    out=dg.DynamicOut(dict),
+    tags={CELERY_QUEUE_TAG: CONTROL_QUEUE},
+)
 def plan_task_executions(
     context: dg.OpExecutionContext, config: CombinationRunConfig
 ) -> Iterator[dg.DynamicOutput[dict]]:
@@ -625,7 +663,19 @@ def plan_task_executions(
     context.instance.add_run_tags(context.run_id, tags)
 
     common = config.model_dump(mode="json")
+    pending_task_ids = set(
+        nonterminal_task_ids(database_path, config.combination_id)
+    )
+    skipped = len(config.task_ids) - len(pending_task_ids)
+    if skipped:
+        context.log.info(
+            "Skipping %d already-terminal logical tasks; %d remain",
+            skipped,
+            len(pending_task_ids),
+        )
     for task_id in config.task_ids:
+        if task_id not in pending_task_ids:
+            continue
         execution_key = task_execution_id(config.combination_id, task_id)
         spec = {
             **common,
@@ -651,7 +701,10 @@ def plan_task_executions(
         )
 
 
-@dg.op(out=dg.DynamicOut(dict))
+@dg.op(
+    out=dg.DynamicOut(dict),
+    tags={CELERY_QUEUE_TAG: CONTROL_QUEUE},
+)
 def plan_rollouts(
     context: dg.OpExecutionContext, config: MatrixConfig
 ) -> Iterator[dg.DynamicOutput[dict]]:
@@ -809,6 +862,7 @@ def _execute_rollout(spec: dict, dagster_run_id: str) -> dict:
         "dataset": spec["dataset"],
         "task_id": spec["task_id"],
         "rollout": spec["rollout"],
+        "total_rollouts": spec.get("total_rollouts", 1),
         "container_cpu_limit": (
             spec.get("container_cpus") if spec["runtime"] == "docker" else None
         ),
@@ -898,6 +952,7 @@ def _hard_failure_row(
         "dataset": spec["dataset"],
         "task_id": spec["task_id"],
         "rollout": spec["rollout"],
+        "total_rollouts": spec.get("total_rollouts", 1),
         "container_cpu_limit": (
             spec.get("container_cpus") if spec.get("runtime") == "docker" else None
         ),
@@ -1258,7 +1313,11 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
                 error_message=str(error),
             )
         _report_run_progress(
-            context, database_path, context.run_id, spec["total_rollouts"]
+            context,
+            database_path,
+            context.run_id,
+            spec["total_rollouts"],
+            combination_key=spec.get("combination_id"),
         )
         context.log.error(
             "Persisted failed rollout to %s before re-raising: %s",
@@ -1295,7 +1354,11 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
                 outcome=row["status"],
             )
     progress_metadata = _report_run_progress(
-        context, database_path, context.run_id, spec["total_rollouts"]
+        context,
+        database_path,
+        context.run_id,
+        spec["total_rollouts"],
+        combination_key=spec.get("combination_id"),
     )
     if tracking_started and row.get("status") == "error":
         detail = row.get("error")
@@ -1341,6 +1404,74 @@ def run_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
             metadata["trace"] = dg.MetadataValue.path(
                 str(Path(row["output_dir"]) / "traces.jsonl")
             )
+    context.add_output_metadata(metadata)
+    return row
+
+
+@dg.op(
+    pool="rollouts",
+    tags={CELERY_QUEUE_TAG: ROLLOUT_QUEUE},
+)
+def run_worker_pool_rollout(context: dg.OpExecutionContext, spec: dict) -> dict:
+    """Execute compute on the Celery-selected host without touching central SQLite."""
+
+    current_worker = worker_name()
+    cached = load_cached_result(spec, context.run_id)
+    if cached is not None:
+        cached["compute_step_key"] = context.get_step_execution_context().step.key
+        context.log.info(
+            "Reusing completed logical rollout %s on worker %s",
+            spec.get("task_execution_id") or spec["key"],
+            current_worker,
+        )
+        context.add_output_metadata(
+            {
+                "worker": current_worker,
+                "result_source": "logical-result-cache",
+                "task": spec["task_id"],
+            }
+        )
+        return cached
+
+    started = time.perf_counter()
+    hard_failure = False
+    try:
+        row = _execute_rollout(spec, context.run_id)
+    except Exception as error:
+        hard_failure = True
+        row = _hard_failure_row(
+            spec, context.run_id, error, time.perf_counter() - started
+        )
+
+    row["worker_name"] = current_worker
+    row["compute_step_key"] = context.get_step_execution_context().step.key
+    row["reused_result"] = False
+    try:
+        row["artifact_uri"] = upload_rollout_artifacts(spec, row)
+    except Exception as error:
+        row["artifact_upload_error"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+        context.log.warning("Could not upload rollout artifacts: %s", error)
+
+    # Cache successful/scored evaluations before Dagster serializes the step
+    # output. Trace errors and hard Python failures must remain retryable; caching
+    # them would make a repaired worker deterministically replay stale failures.
+    if not hard_failure and row.get("status") != "error":
+        store_completed_result(spec, row)
+
+    metadata: dict[str, object] = {
+        "worker": current_worker,
+        "result_source": "computed",
+        "task": spec["task_id"],
+        "status": row["status"],
+    }
+    if row.get("artifact_uri"):
+        # Dagster's URL metadata only accepts HTTP(S) links. Keep the stable
+        # object-store location visible without pretending an ``s3://`` URI is
+        # directly browser-navigable.
+        metadata["artifact_uri"] = dg.MetadataValue.text(row["artifact_uri"])
     context.add_output_metadata(metadata)
     return row
 
@@ -1406,6 +1537,9 @@ def _write_results_db(
                     error_message TEXT,
                     output_dir TEXT NOT NULL,
                     remote_output_dir TEXT,
+                    worker_name TEXT,
+                    artifact_uri TEXT,
+                    reused_result INTEGER,
                     row_json TEXT NOT NULL,
                     PRIMARY KEY (dagster_run_id, rollout_key)
                 )
@@ -1440,6 +1574,9 @@ def _write_results_db(
                 "campaign_id": "TEXT",
                 "combination_id": "TEXT",
                 "task_execution_id": "TEXT",
+                "worker_name": "TEXT",
+                "artifact_uri": "TEXT",
+                "reused_result": "INTEGER",
             }.items():
                 if column not in existing_columns:
                     connection.execute(
@@ -1496,6 +1633,9 @@ def _write_results_db(
                 "error_message",
                 "output_dir",
                 "remote_output_dir",
+                "worker_name",
+                "artifact_uri",
+                "reused_result",
                 "row_json",
             )
             placeholders = ", ".join("?" for _ in columns)
@@ -1561,6 +1701,9 @@ def _database_values(row: dict) -> tuple:
         error_message,
         row["output_dir"],
         row.get("remote_output_dir"),
+        row.get("worker_name"),
+        row.get("artifact_uri"),
+        None if row.get("reused_result") is None else int(row["reused_result"]),
         json.dumps(row, sort_keys=True),
     )
 
@@ -1586,6 +1729,8 @@ def _report_run_progress(
     database_path: Path,
     dagster_run_id: str,
     total_rollouts: int,
+    *,
+    combination_key: str | None = None,
 ) -> dict[str, int | float | str]:
     # Serializing the count and tag update against the results database prevents
     # concurrently finishing mapped steps from publishing progress out of order.
@@ -1593,10 +1738,16 @@ def _report_run_progress(
     try:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("BEGIN IMMEDIATE")
-        completed = connection.execute(
-            "SELECT COUNT(*) FROM rollout_results WHERE dagster_run_id = ?",
-            (dagster_run_id,),
-        ).fetchone()[0]
+        if combination_key is not None:
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM rollout_results WHERE combination_id = ?",
+                (combination_key,),
+            ).fetchone()[0]
+        else:
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM rollout_results WHERE dagster_run_id = ?",
+                (dagster_run_id,),
+            ).fetchone()[0]
         percent = 100 * completed / total_rollouts
         progress = _progress_text(completed, total_rollouts)
         context.instance.add_run_tags(context.run_id, {PROGRESS_TAG: progress})
@@ -1613,7 +1764,73 @@ def _report_run_progress(
     }
 
 
-@dg.op
+@dg.op(tags={CELERY_QUEUE_TAG: CONTROL_QUEUE})
+def persist_worker_pool_rollout(
+    context: dg.OpExecutionContext, row: dict
+) -> dict:
+    """Serialize all campaign-state writes onto the durable control worker."""
+
+    database_path = _persist_rollout_row(row)
+    execution_key = row.get("task_execution_id")
+    state_path = Path(row["state_db_path"]) if row.get("state_db_path") else None
+    row_error = row.get("error")
+    if execution_key and state_path is not None:
+        if row.get("status") == "error":
+            mark_task_terminal(
+                state_path,
+                execution_key,
+                state="error",
+                outcome=None,
+                error_type=(
+                    row_error.get("type")
+                    if isinstance(row_error, dict)
+                    else "RolloutTraceError"
+                ),
+                error_message=(
+                    row_error.get("message")
+                    if isinstance(row_error, dict)
+                    else str(row_error or "rollout trace reported an error")
+                ),
+            )
+        else:
+            mark_task_terminal(
+                state_path,
+                execution_key,
+                state="completed",
+                outcome=row["status"],
+            )
+
+    progress = _report_run_progress(
+        context,
+        database_path,
+        context.run_id,
+        row["total_rollouts"],
+        combination_key=row.get("combination_id"),
+    )
+    metadata: dict[str, object] = {
+        **progress,
+        "database": dg.MetadataValue.path(str(database_path)),
+        "task": row["task_id"],
+        "status": row["status"],
+        "worker": row.get("worker_name") or "unknown",
+        "reused_result": bool(row.get("reused_result")),
+    }
+    for key in ("campaign_id", "combination_id", "task_execution_id"):
+        if row.get(key) is not None:
+            metadata[key] = row[key]
+    if row.get("artifact_uri"):
+        metadata["artifact_uri"] = dg.MetadataValue.text(row["artifact_uri"])
+    context.add_output_metadata(metadata)
+
+    if row.get("status") == "error":
+        context.log.error("Worker-pool rollout failed: %s", row_error)
+        raise dg.Failure(
+            f"task execution {execution_key or row['rollout_key']} completed with an error"
+        )
+    return row
+
+
+@dg.op(tags={CELERY_QUEUE_TAG: CONTROL_QUEUE})
 def write_results(context: dg.OpExecutionContext, rows: list[dict]) -> str:
     if not rows:
         raise dg.Failure("no rollout results were produced")
@@ -1660,20 +1877,56 @@ rollout_executor = dg.multiprocess_executor.configured(
     config_schema={"max_concurrent": dg.Field(int, default_value=8)},
 )
 
+worker_pool_executor = celery_executor.configured(
+    {
+        "broker": {"env": "DAGSTER_CELERY_BROKER_URL"},
+        "backend": {"env": "DAGSTER_CELERY_BACKEND_URL"},
+        "config_source": {
+            "enable_utc": True,
+            "timezone": "UTC",
+            "broker_heartbeat": 30,
+            "broker_heartbeat_checkrate": 2,
+            "worker_prefetch_multiplier": 1,
+            "worker_cancel_long_running_tasks_on_connection_loss": True,
+            "task_acks_late": True,
+            "task_reject_on_worker_lost": True,
+            "task_track_started": True,
+            "broker_connection_retry_on_startup": True,
+            "broker_connection_max_retries": 100_000,
+        },
+    },
+    name="worker_pool",
+)
+
 
 @dg.job(executor_def=rollout_executor)
 def terminal_bench_rollouts() -> None:
     write_results(plan_rollouts().map(run_rollout).collect())
 
 
-@dg.job
+@dg.job(executor_def=dg.in_process_executor)
 def plan_terminal_bench_campaign() -> None:
+    plan_campaign()
+
+
+@dg.job(executor_def=dg.in_process_executor)
+def plan_terminal_bench_worker_pool_campaign() -> None:
     plan_campaign()
 
 
 @dg.job(executor_def=rollout_executor)
 def terminal_bench_combination() -> None:
     write_results(plan_task_executions().map(run_rollout).collect())
+
+
+@dg.job(
+    executor_def=worker_pool_executor,
+    resource_defs=_worker_pool_resource_defs(),
+)
+def terminal_bench_worker_pool_combination() -> None:
+    computed = plan_task_executions().map(run_worker_pool_rollout)
+    persisted = computed.map(persist_worker_pool_rollout)
+    write_results(persisted.collect())
 
 
 def _combination_run_tags(row: dict, run_config: dict) -> dict[str, str]:
@@ -1699,14 +1952,11 @@ def _combination_run_tags(row: dict, run_config: dict) -> dict[str, str]:
     return tags
 
 
-@dg.sensor(
-    job=terminal_bench_combination,
-    minimum_interval_seconds=5,
-    default_status=dg.DefaultSensorStatus.RUNNING,
-    description="Launch and reconcile one Dagster run per benchmark combination.",
-)
-def terminal_bench_campaign_sensor(
+def _campaign_sensor_requests(
     context: dg.SensorEvaluationContext,
+    *,
+    combination_job: dg.JobDefinition,
+    worker_pool: bool,
 ) -> Iterator[dg.RunRequest | dg.SkipReason]:
     database_path = state_database_path()
     if not database_path.is_file():
@@ -1722,7 +1972,7 @@ def terminal_bench_campaign_sensor(
         if run is None:
             matching = context.instance.get_runs(
                 filters=dg.RunsFilter(
-                    job_name=terminal_bench_combination.name,
+                    job_name=combination_job.name,
                     tags={COMBINATION_ID_TAG: combination["combination_id"]},
                 ),
                 limit=1,
@@ -1748,6 +1998,11 @@ def terminal_bench_campaign_sensor(
 
     for combination in pending:
         run_config = json.loads(combination["run_config_json"])
+        if worker_pool:
+            # The persisted planner config contains the legacy multiprocess
+            # executor's max_concurrent field. Capacity is owned by Celery worker
+            # concurrency in the distributed job, so it has no per-run setting.
+            run_config.pop("execution", None)
         mark_combination_queued(database_path, combination["combination_id"])
         yield dg.RunRequest(
             run_key=combination["combination_id"],
@@ -1756,11 +2011,45 @@ def terminal_bench_campaign_sensor(
         )
 
 
+@dg.sensor(
+    job=terminal_bench_combination,
+    minimum_interval_seconds=5,
+    default_status=dg.DefaultSensorStatus.STOPPED,
+    description="Legacy local/SSH campaign launcher.",
+)
+def terminal_bench_campaign_sensor(
+    context: dg.SensorEvaluationContext,
+) -> Iterator[dg.RunRequest | dg.SkipReason]:
+    yield from _campaign_sensor_requests(
+        context,
+        combination_job=terminal_bench_combination,
+        worker_pool=False,
+    )
+
+
+@dg.sensor(
+    job=terminal_bench_worker_pool_combination,
+    minimum_interval_seconds=5,
+    default_status=dg.DefaultSensorStatus.STOPPED,
+    description="Launch benchmark combinations onto the durable Celery worker pool.",
+)
+def terminal_bench_worker_pool_sensor(
+    context: dg.SensorEvaluationContext,
+) -> Iterator[dg.RunRequest | dg.SkipReason]:
+    yield from _campaign_sensor_requests(
+        context,
+        combination_job=terminal_bench_worker_pool_combination,
+        worker_pool=True,
+    )
+
+
 defs = dg.Definitions(
     jobs=[
         plan_terminal_bench_campaign,
+        plan_terminal_bench_worker_pool_campaign,
         terminal_bench_combination,
         terminal_bench_rollouts,
+        terminal_bench_worker_pool_combination,
     ],
-    sensors=[terminal_bench_campaign_sensor],
+    sensors=[terminal_bench_campaign_sensor, terminal_bench_worker_pool_sensor],
 )

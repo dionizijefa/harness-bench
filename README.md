@@ -7,6 +7,80 @@ Campaigns are expanded into one Dagster run per
 `run_rollout` step inside a combination is exactly one Terminal-Bench task and
 one Verifiers rollout.
 
+## Independent multiagent pilot
+
+The multiagent runner has its own strict configs under `configs/multiagent/`,
+artifact cache, output directories, and SQLite accounting database. It never
+launches or imports single-agent campaigns. Each real Hermes/OpenCode coordinator
+uses GPT-6.1 Sol with high reasoning, receives the same task batch, and calls a
+shared MCP delegation tool to launch cheap DeepSeek Flash workers. Each worker
+runs the same pinned harness in an isolated Docker container. Native harness
+subagents are disabled; this is a comparison of the shared batch-delegation
+protocol, rather than native delegation implementations.
+
+With Docker running, set `MULTIAGENT_OPENROUTER_API_KEY` in the environment
+(`OPENROUTER_API_KEY` is also accepted), then run both fresh configurations:
+
+```sh
+uv run python scripts/run_multiagent_bench.py \
+  --config configs/multiagent/hermes-sol-deepseek-two-task.json \
+  --config configs/multiagent/opencode-sol-deepseek-two-task.json
+```
+
+The complete comparison and each team have a 1,200-second execution ceiling,
+including sandbox setup, model execution, and grading. Each worker also has a
+1,200-second lifecycle limit, bounded by the remaining team deadline. The last
+90 seconds are reserved for grading. Artifact preparation and image downloads
+happen before this clock; bounded container cleanup follows it. Both harnesses
+run concurrently, and each coordinator must actually request its two workers.
+The local configs cap each Torch worker at 3 GiB, each PyPI worker at 2 GiB,
+and each coordinator at 2 GiB; this differs from the historical server profile.
+Containers have separate bridge network addresses so both PyPI tasks can bind port 8080.
+
+`outputs/multiagent/<run>/report.html` shows independent grader outcomes, per-agent
+tokens and provider costs, worker overlap, and coordinator overhead. The same
+directory contains frozen configs and runner source snapshots with hashes, the local resource profile,
+a live price snapshot, per-call request/response
+traces, lifecycle events, and `multiagent.sqlite`. Costs and tokens survive partial
+failures; missing provider usage is explicitly marked incomplete. Known spend,
+price estimates, and actual billed cost are separate. Cache and reasoning tokens
+are recorded without double counting. The relay uses Responses for GPT-6.1 tool
+calls, translating CLI Chat requests. Worker streams pass through unchanged.
+All upstream calls use cancellable streams; captured generation IDs allow billing
+reconciliation after cancellation. API keys remain in the host environment and
+are never forwarded to agents.
+
+Each team has a $4 cost admission ceiling and per-agent call/output limits.
+Admission reserves a conservative request cost from the price snapshot before
+sending concurrent calls; calls with unknown billing keep their reservation.
+`--overall-timeout-seconds` can shorten the comparison, and `--prepare-only`
+warms artifacts/images without making model calls. Output directories must be new,
+so separate runs cannot overwrite earlier evidence. These two tasks and one
+repetition screen configurations; they do not establish a general harness ranking.
+
+The original five-task selection is reproducible offline from
+[`analysis/task-selection-input.json`](analysis/task-selection-input.json), which
+contains the aggregate success-rate matrix and original audit fingerprints.
+It covers 78 tasks, nine harnesses, and three equally weighted historical models
+from 3,510 retained trials. Recreate the analysis and its explanatory report with:
+
+```sh
+uv run --group dev python scripts/analyze_task_svd.py
+uv run --group dev python scripts/build_multiagent_pilot_report.py
+```
+
+The first five greedy task-row selections are `torch-pipeline-parallelism`,
+`pypi-server`, `fix-code-vulnerability`, `qemu-startup`, and `sanitize-git-repo`.
+The method removes each task's mean across harnesses and selects residual rows
+that reduce reconstruction error. With learned historical task baselines, five
+rows reconstruct 95.3% of total matrix variance and retain 79.1% of its harness
+contrasts; held-out prediction on
+unmeasured tasks reaches 48.3%. These results motivate a screening set and do not
+validate a multiagent harness ranking. The report preserves the original proposed
+five-task protocol; the implemented two-task protocol is defined by the fresh
+configs above. Raw rollout records, general exports, charts, and generated reports
+are excluded from Git; reproduction writes outputs under `outputs/analysis/`.
+
 # WARNING HUMANS: README FOR LLMs below
 
 ## Durable distributed worker pool (recommended)

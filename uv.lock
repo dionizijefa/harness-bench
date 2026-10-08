@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'win32'",
@@ -1154,14 +1154,19 @@ dependencies = [
     { name = "dagster-docker" },
     { name = "dagster-postgres" },
     { name = "dagster-webserver" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "mcp" },
     { name = "prime-pydantic-config", extra = ["toml"] },
     { name = "renderers" },
+    { name = "uvicorn" },
     { name = "verifiers", extra = ["harbor"] },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "matplotlib" },
+    { name = "numpy" },
     { name = "pytest" },
 ]
 
@@ -1173,14 +1178,19 @@ requires-dist = [
     { name = "dagster-docker", specifier = "==0.29.13" },
     { name = "dagster-postgres", specifier = "==0.29.13" },
     { name = "dagster-webserver", specifier = "==1.13.13" },
+    { name = "fastapi", specifier = ">=0.139,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "mcp", specifier = ">=1.28,<2" },
     { name = "prime-pydantic-config", extras = ["toml"], specifier = ">=0.3.0.dev86" },
     { name = "renderers", specifier = ">=0.1.8.dev40" },
+    { name = "uvicorn", specifier = ">=0.51,<1" },
     { name = "verifiers", extras = ["harbor"], specifier = "==0.2.1" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "matplotlib", specifier = ">=3.10,<4" },
+    { name = "numpy", specifier = ">=2,<3" },
     { name = "pytest", specifier = ">=8" },
 ]
 

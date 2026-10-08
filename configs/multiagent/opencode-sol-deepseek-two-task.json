@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "benchmark_type": "multiagent",
+  "name": "opencode-sol-deepseek-two-task",
+  "dataset": "terminal-bench/terminal-bench-2-1",
+  "task_ids": ["torch-pipeline-parallelism", "pypi-server"],
+  "harness": {"id": "opencode", "version": "1.18.1"},
+  "orchestrator": {"model": "openai/gpt-6.1-sol", "reasoning_effort": "high", "max_output_tokens": 8192, "max_calls": 32, "api": "responses"},
+  "executor": {"model": "~deepseek/deepseek-v4-flash-latest", "reasoning_effort": "medium", "max_output_tokens": 8192, "max_calls": 150, "api": "chat"},
+  "max_parallel_workers": 2,
+  "batch_timeout_seconds": 1200,
+  "worker_timeout_seconds": 1200,
+  "grading_reserve_seconds": 90,
+  "max_cost_usd": 4,
+  "sandbox": {"image": "ubuntu:24.04", "platform": "linux/amd64", "worker_cpus": 2, "worker_memory_gb": 3, "task_memory_gb": {"pypi-server": 2}, "coordinator_cpus": 1, "coordinator_memory_gb": 2}
+}

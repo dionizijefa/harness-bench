@@ -5,6 +5,10 @@ description = "Terminal-Bench rollout matrices with Verifiers v1 and Dagster."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
+    "fastapi>=0.139,<1",
+    "httpx>=0.28,<1",
+    "mcp>=1.28,<2",
+    "uvicorn>=0.51,<1",
     "dagster==1.13.13",
     "dagster-aws==0.29.13",
     "dagster-celery==0.29.13",
@@ -18,9 +22,13 @@ dependencies = [
     "verifiers[harbor]==0.2.1",
 ]
 
+[project.scripts]
+harness-multiagent-bench = "harness_bloat_bench.multiagent.runner:main"
+
 [dependency-groups]
 dev = [
     "matplotlib>=3.10,<4",
+    "numpy>=2,<3",
     "pytest>=8",
 ]
 

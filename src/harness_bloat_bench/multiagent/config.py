@@ -22,7 +22,7 @@ class ModelSpec(StrictConfig):
 
 
 class HarnessSpec(StrictConfig):
-    id: Literal["hermes_agent", "opencode"]
+    id: Literal["hermes_agent", "opencode", "omp_agent", "claude_code_agent", "codex_agent"]
     version: str
 
 
@@ -89,6 +89,8 @@ class TeamConfig(StrictConfig):
             supported = {"pypi-server", "fix-code-vulnerability", "qemu-startup", "sanitize-git-repo"}
             if self.dataset != "terminal-bench/terminal-bench-2-1" or set(self.task_ids) != supported:
                 raise ValueError("Legacy task scoring in shared_container requires the four-task Terminal-Bench 2.1 pilot")
+        if self.scoring == "task" and self.harness.id not in ("hermes_agent", "opencode"):
+            raise ValueError("Legacy multiagent protocols support only Hermes and OpenCode")
         return self
 
 

@@ -1,0 +1,838 @@
+The full batch needs native adapters for OMP, Claude Code and Codex.{
+  "schema_version": 1,
+  "kind": "multiagent_batch_plan",
+  "status": "draft_requires_runner_wiring",
+  "batch_id": "vba-sol-opus-astra-15",
+  "combination_count": 15,
+  "repetitions": 1,
+  "total_runs": 15,
+  "source_commit": "dd29801e2a831d18f1a970ba4c738a939605b3e5",
+  "checked_at": "2026-10-11T19:34:08.515719+00:00",
+  "common_config": {
+    "schema_version": 1,
+    "benchmark_type": "multiagent",
+    "execution_mode": "shared_container",
+    "dataset": "terminal-bench/terminal-bench@4.0.0",
+    "task_ids": [
+      "vba-userform-port"
+    ],
+    "max_parallel_workers": null,
+    "batch_timeout_seconds": 4500,
+    "worker_timeout_seconds": 900,
+    "grading_reserve_seconds": 3600,
+    "max_cost_usd": null,
+    "sandbox": {
+      "image": "ubuntu:24.04",
+      "platform": "linux/amd64",
+      "shared_cpus": 8,
+      "shared_memory_gb": 16
+    },
+    "scoring": "vba_subtasks_v1"
+  },
+  "harness_version_policy": "Current repository DEFAULT_HARNESS_VERSIONS",
+  "haiku_selection": "anthropic/claude-haiku-5.5 is the current Haiku model; high effort is supported.",
+  "model_checks": {
+    "openai/gpt-6.1-sol": {
+      "requested_effort": "max",
+      "supported": true,
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ],
+        "default_effort": "medium"
+      },
+      "model_url": "https://openrouter.ai/openai/gpt-6.1-sol",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    },
+    "z-ai/glm-5.3-flash": {
+      "requested_effort": "high",
+      "supported": true,
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "max"
+      },
+      "model_url": "https://openrouter.ai/z-ai/glm-5.3-flash",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    },
+    "anthropic/claude-opus-5.5": {
+      "requested_effort": "max",
+      "supported": true,
+      "reasoning": {
+        "mandatory": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ],
+        "default_effort": "high"
+      },
+      "model_url": "https://openrouter.ai/anthropic/claude-opus-5.5",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    },
+    "anthropic/claude-haiku-5.5": {
+      "requested_effort": "high",
+      "supported": true,
+      "reasoning": {
+        "mandatory": false,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ],
+        "default_effort": "medium"
+      },
+      "model_url": "https://openrouter.ai/anthropic/claude-haiku-5.5",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    },
+    "openai/gpt-6-astra": {
+      "requested_effort": "max",
+      "supported": true,
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ],
+        "default_effort": "medium"
+      },
+      "model_url": "https://openrouter.ai/openai/gpt-6-astra",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    },
+    "openai/gpt-6-luna": {
+      "requested_effort": "high",
+      "supported": true,
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low",
+          "none"
+        ],
+        "default_effort": "medium"
+      },
+      "model_url": "https://openrouter.ai/openai/gpt-6-luna",
+      "catalog_source": "https://openrouter.ai/api/v1/models"
+    }
+  },
+  "combinations": [
+    {
+      "pairing": "sol-max-glm-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "hermes-sol-max-glm-high-vba-userform-port",
+        "harness": {
+          "id": "hermes_agent",
+          "version": "0.20.0"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6.1-sol",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "z-ai/glm-5.3-flash",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/hermes_agent.py"
+    },
+    {
+      "pairing": "sol-max-glm-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "opencode-sol-max-glm-high-vba-userform-port",
+        "harness": {
+          "id": "opencode",
+          "version": "1.18.1"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6.1-sol",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "z-ai/glm-5.3-flash",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/opencode.py"
+    },
+    {
+      "pairing": "sol-max-glm-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "omp-sol-max-glm-high-vba-userform-port",
+        "harness": {
+          "id": "omp_agent",
+          "version": "17.2.10"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6.1-sol",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "z-ai/glm-5.3-flash",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/omp_agent.py"
+    },
+    {
+      "pairing": "sol-max-glm-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "claude-code-sol-max-glm-high-vba-userform-port",
+        "harness": {
+          "id": "claude_code_agent",
+          "version": "2.1.226"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6.1-sol",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "z-ai/glm-5.3-flash",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/claude_code.py"
+    },
+    {
+      "pairing": "sol-max-glm-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "codex-sol-max-glm-high-vba-userform-port",
+        "harness": {
+          "id": "codex_agent",
+          "version": "0.137.0"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6.1-sol",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "z-ai/glm-5.3-flash",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/codex_agent.py"
+    },
+    {
+      "pairing": "opus-max-haiku-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "hermes-opus-max-haiku-high-vba-userform-port",
+        "harness": {
+          "id": "hermes_agent",
+          "version": "0.20.0"
+        },
+        "orchestrator": {
+          "model": "anthropic/claude-opus-5.5",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        },
+        "executor": {
+          "model": "anthropic/claude-haiku-5.5",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/hermes_agent.py"
+    },
+    {
+      "pairing": "opus-max-haiku-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "opencode-opus-max-haiku-high-vba-userform-port",
+        "harness": {
+          "id": "opencode",
+          "version": "1.18.1"
+        },
+        "orchestrator": {
+          "model": "anthropic/claude-opus-5.5",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        },
+        "executor": {
+          "model": "anthropic/claude-haiku-5.5",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/opencode.py"
+    },
+    {
+      "pairing": "opus-max-haiku-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "omp-opus-max-haiku-high-vba-userform-port",
+        "harness": {
+          "id": "omp_agent",
+          "version": "17.2.10"
+        },
+        "orchestrator": {
+          "model": "anthropic/claude-opus-5.5",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        },
+        "executor": {
+          "model": "anthropic/claude-haiku-5.5",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/omp_agent.py"
+    },
+    {
+      "pairing": "opus-max-haiku-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "claude-code-opus-max-haiku-high-vba-userform-port",
+        "harness": {
+          "id": "claude_code_agent",
+          "version": "2.1.226"
+        },
+        "orchestrator": {
+          "model": "anthropic/claude-opus-5.5",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        },
+        "executor": {
+          "model": "anthropic/claude-haiku-5.5",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/claude_code.py"
+    },
+    {
+      "pairing": "opus-max-haiku-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "codex-opus-max-haiku-high-vba-userform-port",
+        "harness": {
+          "id": "codex_agent",
+          "version": "0.137.0"
+        },
+        "orchestrator": {
+          "model": "anthropic/claude-opus-5.5",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        },
+        "executor": {
+          "model": "anthropic/claude-haiku-5.5",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "chat"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/codex_agent.py"
+    },
+    {
+      "pairing": "astra-max-luna-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "hermes-astra-max-luna-high-vba-userform-port",
+        "harness": {
+          "id": "hermes_agent",
+          "version": "0.20.0"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6-astra",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "openai/gpt-6-luna",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/hermes_agent.py"
+    },
+    {
+      "pairing": "astra-max-luna-high",
+      "readiness": "requires_live_preflight",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "opencode-astra-max-luna-high-vba-userform-port",
+        "harness": {
+          "id": "opencode",
+          "version": "1.18.1"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6-astra",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "openai/gpt-6-luna",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        }
+      },
+      "multiagent_runner_supported": true,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/opencode.py"
+    },
+    {
+      "pairing": "astra-max-luna-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "omp-astra-max-luna-high-vba-userform-port",
+        "harness": {
+          "id": "omp_agent",
+          "version": "17.2.10"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6-astra",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "openai/gpt-6-luna",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/omp_agent.py"
+    },
+    {
+      "pairing": "astra-max-luna-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "claude-code-astra-max-luna-high-vba-userform-port",
+        "harness": {
+          "id": "claude_code_agent",
+          "version": "2.1.226"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6-astra",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "openai/gpt-6-luna",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/claude_code.py"
+    },
+    {
+      "pairing": "astra-max-luna-high",
+      "readiness": "requires_multiagent_runner_wiring",
+      "config": {
+        "schema_version": 1,
+        "benchmark_type": "multiagent",
+        "execution_mode": "shared_container",
+        "dataset": "terminal-bench/terminal-bench@4.0.0",
+        "task_ids": [
+          "vba-userform-port"
+        ],
+        "max_parallel_workers": null,
+        "batch_timeout_seconds": 4500,
+        "worker_timeout_seconds": 900,
+        "grading_reserve_seconds": 3600,
+        "max_cost_usd": null,
+        "sandbox": {
+          "image": "ubuntu:24.04",
+          "platform": "linux/amd64",
+          "shared_cpus": 8,
+          "shared_memory_gb": 16
+        },
+        "scoring": "vba_subtasks_v1",
+        "name": "codex-astra-max-luna-high-vba-userform-port",
+        "harness": {
+          "id": "codex_agent",
+          "version": "0.137.0"
+        },
+        "orchestrator": {
+          "model": "openai/gpt-6-astra",
+          "reasoning_effort": "max",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        },
+        "executor": {
+          "model": "openai/gpt-6-luna",
+          "reasoning_effort": "high",
+          "max_output_tokens": 8192,
+          "max_calls": 150,
+          "api": "responses"
+        }
+      },
+      "multiagent_runner_supported": false,
+      "existing_harness_adapter": "src/harness_bloat_bench/harnesses/codex_agent.py"
+    }
+  ],
+  "readiness_counts": {
+    "multiagent_runner_supported": 6,
+    "multiagent_runner_wiring_required": 9
+  },
+  "runner_gap": "All five harness adapters already exist. The standalone VBA runner currently wires only Hermes and OpenCode; OMP, Claude Code and Codex need their existing adapters connected and native helper-model routing configured."
+}

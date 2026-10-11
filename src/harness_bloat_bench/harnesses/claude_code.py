@@ -13,7 +13,7 @@ from verifiers.v1.harness import Harness
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
 
-from harness_bloat_bench.harness_cache import ensure_claude_cached, stage_cached_file
+from harness_bench.harness_cache import ensure_claude_cached, stage_cached_file
 
 from ._common import json_bytes, release_version, run_install
 

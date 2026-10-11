@@ -24,7 +24,9 @@ def normalized_usage(raw: dict | None, pricing: dict) -> dict:
     outputs = raw.get("output_tokens", raw.get("completion_tokens"))
     input_details = raw.get("input_tokens_details", raw.get("prompt_tokens_details")) or {}
     output_details = raw.get("output_tokens_details", raw.get("completion_tokens_details")) or {}
-    cached = input_details.get("cached_tokens", 0) or 0
+    cached = input_details.get("cached_tokens", raw.get("cache_read_input_tokens", 0)) or 0
+    if inputs is not None and ("cache_read_input_tokens" in raw or "cache_creation_input_tokens" in raw):
+        inputs += cached + (raw.get("cache_creation_input_tokens", 0) or 0)
     cost = raw.get("cost")
     estimated = None
     if cost is None and inputs is not None and outputs is not None:
@@ -42,7 +44,7 @@ def normalized_usage(raw: dict | None, pricing: dict) -> dict:
         "output_tokens": outputs,
         "total_tokens": raw.get("total_tokens", inputs + outputs if inputs is not None and outputs is not None else None),
         "cached_input_tokens": cached,
-        "reasoning_tokens": output_details.get("reasoning_tokens"),
+        "reasoning_tokens": output_details.get("reasoning_tokens", output_details.get("thinking_tokens")),
         "cost_usd": cost,
         "estimated_cost_usd": estimated,
         "usage_source": "provider" if cost is not None else "price_estimate" if estimated is not None else "provider_tokens_only",

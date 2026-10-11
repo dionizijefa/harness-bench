@@ -102,7 +102,9 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
     manifest = {"benchmark_type": "multiagent", "created_at": utc_now(), "overall_timeout_seconds": overall_timeout, "configs": [config.model_dump() for config in configs], "protocols": {config.name: "native_harness" if config.scoring == "vba_subtasks_v1" else config.execution_mode for config in configs}, "statistics_database": "multiagent.sqlite", "single_agent_statistics_imported": False}
     manifest["config_sha256"] = hashlib.sha256(json.dumps(manifest["configs"], sort_keys=True).encode()).hexdigest()
     manifest["implementation_sha256"] = {}
-    for path in sorted(Path(__file__).parent.glob("*.py")):
+    package = Path(__file__).parent.parent
+    sources = [*Path(__file__).parent.glob("*.py"), *package.joinpath("harnesses").glob("*.py"), package / "harness_cache.py"]
+    for path in sorted(sources):
         relative = path.relative_to(Path(__file__).resolve().parents[3])
         source = path.read_bytes()
         manifest["implementation_sha256"][str(relative)] = hashlib.sha256(source).hexdigest()

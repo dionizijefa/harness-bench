@@ -11,6 +11,7 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from verifiers.v1.dialects.chat import ChatStreamParser
+from verifiers.v1.dialects.anthropic import AnthropicStreamParser, ModdedAnthropicMessage
 
 from .accounting import Ledger, normalized_usage, scrub
 from .config import ModelSpec
@@ -112,6 +113,8 @@ class AgentRoute:
     prior_outputs: dict[str, list] = field(default_factory=dict)
     native_executor: AgentRoute | None = None
     aggregate_native_workers: bool = False
+    native_executor_model_alias: str | None = None
+    native_executor_header: tuple[str, str] | None = None
 
 
 class Gateway:
@@ -124,14 +127,34 @@ class Gateway:
     def register(self, route: AgentRoute):
         self.routes[route.agent_id] = route
 
+    def request_route(self, route, body, headers):
+        if route.native_executor:
+            by_model = route.native_executor_model_alias is not None and body.get("model") == route.native_executor_model_alias
+            by_header = route.native_executor_header is not None and headers.get(route.native_executor_header[0]) == route.native_executor_header[1]
+            if by_model or by_header:
+                return route.native_executor
+        return route
+
     async def relay(self, agent_id: str, path: str, request: Request):
         route = self.routes.get(agent_id)
-        if route is None or request.headers.get("authorization") != "Bearer " + route.token:
+        if route is None or not (request.headers.get("authorization") == "Bearer " + route.token
+                                 or request.headers.get("x-api-key") == route.token):
             raise HTTPException(401, "Invalid agent credential")
+        body = await request.json()
+        route = self.request_route(route, body, request.headers)
+        agent_id = route.agent_id
         remaining = route.deadline - time.monotonic()
         if remaining <= 0:
             raise HTTPException(408, "Agent deadline reached")
-        body = await request.json()
+        headers = {"Authorization": "Bearer " + self.key, "X-Title": "Harness Bench Multiagent"}
+        if path.startswith("messages"):
+            headers["anthropic-version"] = request.headers.get("anthropic-version", "2023-06-01")
+            if request.headers.get("anthropic-beta"):
+                headers["anthropic-beta"] = request.headers["anthropic-beta"]
+        if path == "messages/count_tokens":
+            async with asyncio.timeout_at(route.deadline):
+                response = await self.http.post(self.base_url + "/" + path, headers=headers, json={**body, "model": route.model.model})
+            return JSONResponse(response.json(), status_code=response.status_code)
         calls = [r for r in self.ledger.records.values() if r["agent_id"] == agent_id]
         # Native children share credentials; their iteration limits belong to
         # the harness, rather than imposing one helper's limit on the whole pool.
@@ -148,13 +171,20 @@ class Gateway:
         committed = sum(r.get("budget_charge_usd", r.get("reserved_cost_usd", 0)) for r in self.ledger.records.values() if r["team"] == route.team)
         if route.max_cost_usd is not None and committed + reservation > route.max_cost_usd:
             raise HTTPException(429, "Team cost admission ceiling reached")
-        if path not in ("chat/completions", "responses"):
+        if path not in ("chat/completions", "responses", "messages"):
             raise HTTPException(404, "Unsupported model endpoint")
         stream = body.get("stream", False)
         translate = path == "chat/completions" and route.model.api == "responses"
         if translate:
             upstream = chat_to_responses(body, route.model, route.prior_outputs)
             upstream_path = "responses"
+        elif path == "messages":
+            upstream = {**body, "model": route.model.model, "stream": False,
+                        "max_tokens": route.model.max_output_tokens,
+                        "thinking": {"type": "adaptive"},
+                        "output_config": {**body.get("output_config", {}), "effort": route.model.reasoning_effort}}
+            upstream.pop("reasoning", None)
+            upstream_path = path
         else:
             upstream = {**body, "model": route.model.model, "stream": False}
             upstream.pop("stream_options", None)
@@ -179,7 +209,7 @@ class Gateway:
         handed_off = False
         try:
             async with asyncio.timeout_at(route.deadline):
-                request = self.http.build_request("POST", self.base_url + "/" + upstream_path, headers={"Authorization": "Bearer " + self.key, "X-Title": "Harness Bench Multiagent"}, json=upstream)
+                request = self.http.build_request("POST", self.base_url + "/" + upstream_path, headers=headers, json=upstream)
                 response = await self.http.send(request, stream=True)
             generation_id = response.headers.get("x-generation-id")
             if generation_id:
@@ -243,6 +273,7 @@ class Gateway:
     async def read_stream(self, response, path, route, call_id, directory, started, reservation, collected):
         self.inflight[call_id] = asyncio.current_task()
         parser = ChatStreamParser() if path == "chat/completions" else None
+        anthropic = AnthropicStreamParser(validate_response=ModdedAnthropicMessage.model_validate) if path == "messages" else None
         raw = {}
         status = "completed"
         terminal_seen = False
@@ -266,6 +297,13 @@ class Gateway:
                                 if parser:
                                     parser.feed(("data: " + payload + "\n\n").encode())
                                     native = packet
+                                elif anthropic:
+                                    anthropic.feed(("data: " + payload + "\n\n").encode())
+                                    native = packet.get("message") or packet
+                                    if packet.get("type") == "message_stop":
+                                        terminal_seen = True
+                                    if anthropic.message.get("usage"):
+                                        partial_usage = dict(anthropic.message["usage"])
                                 else:
                                     native = packet.get("response") or packet
                                     if packet.get("type") in ("response.completed", "response.incomplete", "response.failed"):
@@ -281,7 +319,7 @@ class Gateway:
                                     changed = True
                                 if changed:
                                     self.ledger.save(call_id)
-                                if native.get("usage"):
+                                if native.get("usage") and not anthropic:
                                     partial_usage = native["usage"]
                                 if packet.get("error") or native.get("status") == "failed":
                                     status = "error"
@@ -301,6 +339,14 @@ class Gateway:
             raw = {"error": {"message": scrub(str(error)) or "Agent stream deadline reached"}}
             yield "data: " + json.dumps(raw) + "\n\n"
         finally:
+            if anthropic:
+                try:
+                    anthropic.finish()
+                    raw = {**raw, **anthropic.message}
+                except Exception as error:
+                    if status == "completed":
+                        status = "error"
+                        raw = {"error": {"message": scrub(str(error))}, "usage": partial_usage}
             if parser and status == "completed":
                 try:
                     parser.finish()  # materialize accumulated parts, retaining native usage

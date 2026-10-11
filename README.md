@@ -59,8 +59,14 @@ The orchestrator receives the original Terminal-Bench task prompt plus time,
 shared-resource, subagent and final-submission instructions, and chooses how to
 split the work using the original harness's native subagents. Hermes uses its
 default CLI toolsets and native `delegate_task`; OpenCode uses its built-in
-`task` tool and `general`/`explore` agents. Their native prompts and behavior
-remain in place, with the configured executor model selected for subagents.
+`task` tool and `general`/`explore` agents. OMP, Claude Code and Codex reuse the
+existing repository adapters. Their native prompts and behavior remain in place.
+The configured orchestrator and executor models and reasoning efforts are
+enforced on provider requests. OMP selects its helper provider through built-in
+agent model settings; Claude Code uses its native subagent model setting; Codex
+identifies spawned threads with its native request header, including full-history
+forks. These settings add no instructions to the initial prompt or helper prompts.
+No helper instructions or iteration overrides are added by the benchmark.
 All agents share the workspace. No benchmark MCP server or tools are exposed.
 The native path in `src/harness_bloat_bench/multiagent/vba_run.py` launches one
 CLI, enforces its deadline, records usage and grades the submitted application.
@@ -69,6 +75,13 @@ and `legacy_shared.py` for the 2.1 configs.
 The rubric is used only for grading and reporting; it is not exposed to agents.
 No hidden grading runs while agents are working. Only the orchestrator's final
 exit submits the app.
+
+The batch plan in `configs/multiagent/batches/vba-sol-opus-astra-15.json` contains
+three fixed model pairs across Hermes, OpenCode, OMP, Claude Code and Codex:
+Sol 6.1 Max → GLM 5.3 Flash High, Opus 5.5 Max → Haiku 5.5 High, and
+Astra 6 Max → Luna 6 High. Each exported JSON in the adjacent
+`vba-sol-opus-astra-15/` directory is a standalone runner config. The batch has
+15 runs, each with eight CPUs, 16 GiB RAM and the same single initial task prompt.
 
 The runner resolves the pinned dataset and downloads only `vba-userform-port`.
 It prepares the agent image and **separate verifier image** before timing starts,
@@ -99,8 +112,8 @@ does not extend grading beyond its 60-minute cap. The total team/comparison cap
 is 4,500 seconds (75 minutes).
 Image builds and harness downloads happen before the clock. There is no benchmark
 worker concurrency or dollar cap; native delegation defaults apply. Orchestrator
-call limits, native subagent iteration limits and model output limits come from
-the configs.
+call limits and model output limits come from the configs. Helper iteration
+limits use the harness defaults.
 `--overall-timeout-seconds` overrides the comparison deadline; by default it
 comes from the configs. Longer runs are supported up to 29,700 seconds. The 2.1
 legacy configs keep their existing limits.

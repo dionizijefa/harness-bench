@@ -57,10 +57,14 @@ def test_hermes_setup_preserves_task_python_and_ssl(tmp_path, monkeypatch, setup
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("harness", ["hermes", "opencode"])
+@pytest.mark.parametrize("harness", ["hermes", "opencode", "omp_agent", "claude_code_agent", "codex_agent"])
 def test_vba_uses_actual_native_subagents_without_mcp(tmp_path, harness, monkeypatch):
     async def scenario():
-        config = load_config(ROOT / f"configs/multiagent/{harness}-sol-deepseek-vba-userform-port.json")
+        config = load_config(ROOT / "configs/multiagent/hermes-sol-deepseek-vba-userform-port.json")
+        versions = {"hermes": ("hermes_agent", "0.20.0"), "opencode": ("opencode", "1.18.1"),
+                    "omp_agent": ("omp_agent", "17.2.10"), "claude_code_agent": ("claude_code_agent", "2.1.226"),
+                    "codex_agent": ("codex_agent", "0.137.0")}
+        config.harness.id, config.harness.version = versions[harness]
         config.grading_reserve_seconds = 30
         config.sandbox.shared_cpus = 2
         config.sandbox.shared_memory_gb = 2
@@ -82,38 +86,98 @@ def test_vba_uses_actual_native_subagents_without_mcp(tmp_path, harness, monkeyp
             submitted.append(True)
         monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.grade_vba", grade)
         app = FastAPI()
-        @app.post("/agents/{agent_id}/v1/chat/completions")
-        async def model(agent_id: str, request: Request):
+        @app.post("/agents/{agent_id}/v1/{path:path}")
+        async def model(agent_id: str, path: str, request: Request):
             body = await request.json()
             route = gateway.routes[agent_id]
-            assert request.headers.get("authorization") == "Bearer " + route.token
-            requests.append({"agent_id": agent_id, "body": body})
-            funcs = {tool["function"]["name"]: tool["function"] for tool in body.get("tools", [])}
+            assert (request.headers.get("authorization") == "Bearer " + route.token
+                    or request.headers.get("x-api-key") == route.token)
+            if route.native_executor and (body.get("model") == route.native_executor_model_alias
+                                         or request.headers.get("x-openai-subagent") == "collab_spawn"):
+                agent_id = route.native_executor.agent_id
+            requests.append({"agent_id": agent_id, "path": path, "headers": dict(request.headers), "body": body})
+            if path == "messages/count_tokens":
+                return {"input_tokens": 1}
+            funcs = {}
+            namespaces = {}
+            for tool in body.get("tools", []):
+                if tool.get("type") == "namespace":
+                    for nested in tool.get("tools", []):
+                        funcs[nested["name"]] = nested
+                        namespaces[nested["name"]] = tool["name"]
+                elif tool.get("type") == "function":
+                    fn = tool.get("function", tool)
+                    funcs[fn["name"]] = fn
+                elif "name" in tool and "input_schema" in tool:
+                    funcs[tool["name"]] = tool
             assert not any("mcp__bench" in name.lower() or "spawn_subagent" in name for name in funcs)
             stage = counts.get(agent_id, 0)
             if funcs:
                 counts[agent_id] = stage + 1
             name, args = None, {}
             if funcs and agent_id.endswith("-main") and stage == 0:
-                name = "delegate_task" if harness == "hermes" else "task"
+                if harness == "hermes":
+                    name, args = "delegate_task", {"goal": "Write helper to /tmp/native-vba-result", "background": False}
+                elif harness == "opencode":
+                    name, args = "task", {"description": "Write shared result", "prompt": "Write helper to /tmp/native-vba-result", "subagent_type": "general"}
+                elif harness == "omp_agent":
+                    name, args = "task", {"context": "Write the shared result", "tasks": [{"agent": "task", "task": "Write helper to /tmp/native-vba-result"}]}
+                elif harness == "claude_code_agent":
+                    name = "Agent" if "Agent" in funcs else "Task"
+                    args = {"description": "Write shared result", "prompt": "Write helper to /tmp/native-vba-result", "subagent_type": "general-purpose"}
+                else:
+                    name, args = "spawn_agent", {"task_name": "write_result", "message": "Write helper to /tmp/native-vba-result"}
                 assert name in funcs, sorted(funcs)
-                args = ({"goal": "Write helper to /tmp/native-vba-result", "background": False} if harness == "hermes"
-                        else {"description": "Write shared result", "prompt": "Write helper to /tmp/native-vba-result", "subagent_type": "general"})
             elif funcs and agent_id.endswith("-native-executors") and stage == 0:
-                name = "terminal" if harness == "hermes" else "bash"
+                choices = {"hermes": "terminal", "opencode": "bash", "omp_agent": "bash", "claude_code_agent": "Bash", "codex_agent": "exec_command"}
+                name = choices[harness]
                 assert name in funcs, sorted(funcs)
-                args = {"command": "printf helper > /tmp/native-vba-result"}
-                if "description" in funcs[name].get("parameters", {}).get("properties", {}):
+                args = {"cmd" if harness == "codex_agent" else "command": "printf helper > /tmp/native-vba-result"}
+                if "description" in funcs[name].get("parameters", funcs[name].get("input_schema", {})).get("properties", {}):
                     args["description"] = "Write shared result"
             elif funcs and agent_id.endswith("-native-executors"):
                 helper_done.set()
             elif funcs and agent_id.endswith("-main"):
                 await asyncio.wait_for(helper_done.wait(), 30)
+            identifier = "native-response-" + str(len(requests))
+            if path == "messages":
+                content = [{"type": "tool_use", "id": identifier, "name": name, "input": args}] if name else [{"type": "text", "text": "The work is ready."}]
+                raw = {"id": identifier, "type": "message", "role": "assistant", "model": body["model"], "content": content,
+                       "stop_reason": "tool_use" if name else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}
+                async def events():
+                    packets = [{"type": "message_start", "message": {**raw, "content": [], "stop_reason": None}}]
+                    for i, block in enumerate(content):
+                        packets.append({"type": "content_block_start", "index": i, "content_block": {**block, "input": {}} if name else {**block, "text": ""}})
+                        if name:
+                            packets.append({"type": "content_block_delta", "index": i, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}})
+                        else:
+                            packets.append({"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": block["text"]}})
+                        packets.append({"type": "content_block_stop", "index": i})
+                    packets += [{"type": "message_delta", "delta": {"stop_reason": raw["stop_reason"], "stop_sequence": None}, "usage": {"output_tokens": 1}}, {"type": "message_stop"}]
+                    for packet in packets:
+                        yield "event: " + packet["type"] + "\ndata: " + json.dumps(packet) + "\n\n"
+                return StreamingResponse(events(), media_type="text/event-stream") if body.get("stream") else raw
+            if path == "responses":
+                item = ({"type": "function_call", "id": identifier + "-item", "call_id": identifier, "name": name, "arguments": json.dumps(args), "status": "completed"}
+                        if name else {"type": "message", "id": identifier + "-item", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The work is ready.", "annotations": []}]})
+                if name in namespaces:
+                    item["namespace"] = namespaces[name]
+                raw = {"id": identifier, "object": "response", "created_at": int(time.time()), "status": "completed", "model": body["model"], "output": [item],
+                       "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+                async def events():
+                    packets = [{"type": "response.created", "response": {**raw, "status": "in_progress", "output": []}},
+                               {"type": "response.output_item.added", "output_index": 0, "item": {**item, "arguments": ""} if name else item}]
+                    if name:
+                        packets.append({"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": 0, "delta": json.dumps(args)})
+                    packets += [{"type": "response.output_item.done", "output_index": 0, "item": item}, {"type": "response.completed", "response": raw}]
+                    for packet in packets:
+                        yield "event: " + packet["type"] + "\ndata: " + json.dumps(packet) + "\n\n"
+                return StreamingResponse(events(), media_type="text/event-stream") if body.get("stream") else raw
             message = {"role": "assistant", "content": "The work is ready."}
             if name:
-                message = {"role": "assistant", "content": None, "tool_calls": [{"id": "native-" + str(len(requests)), "type": "function",
+                message = {"role": "assistant", "content": None, "tool_calls": [{"id": identifier, "type": "function",
                             "function": {"name": name, "arguments": json.dumps(args)}}]}
-            raw = {"id": "native-response-" + str(len(requests)), "created": int(time.time()), "model": body["model"],
+            raw = {"id": identifier, "created": int(time.time()), "model": body["model"],
                    "object": "chat.completion", "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if name else "stop"}],
                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
             return StreamingResponse(chat_sse(raw), media_type="text/event-stream") if body.get("stream") else raw

@@ -139,8 +139,7 @@ class VbaRun:
             **{key: row[key] for key in ("passed_subtasks", "scored_subtasks", "subtask_count", "scored_checks", "check_count")},
             "runtime_seconds": (self.finished_at or time.monotonic()) - self.started,
             "limits": {"batch_seconds": self.config.batch_timeout_seconds, "max_cost_usd": self.config.max_cost_usd,
-                       "grading_reserve_seconds": self.config.grading_reserve_seconds,
-                       "executor_max_iterations": self.config.executor.max_calls},
+                       "grading_reserve_seconds": self.config.grading_reserve_seconds},
             "usage": total_usage,
             "coordinator_cost_fraction": main_usage["provider_cost_usd"] / total_usage["provider_cost_usd"] if total_usage["provider_cost_usd"] else None,
         }

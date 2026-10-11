@@ -11,6 +11,7 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from verifiers.v1.runtimes import DockerConfig, DockerRuntime, ProgramResult
@@ -21,16 +22,35 @@ from harness_bloat_bench.harness_cache import (
     cache_root,
     ensure_docker_built_tree,
     ensure_opencode_cached,
+    ensure_omp_cached,
+    ensure_claude_cached,
+    ensure_codex_cached,
     install_cached_python_runtime_script,
     stage_cached_file,
     stage_cached_tree,
 )
 from harness_bloat_bench.harnesses.hermes_agent import HERMES_BIN, HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, _install_script
 from harness_bloat_bench.harnesses.opencode import OPENCODE_BIN
+from harness_bloat_bench.harnesses.omp_agent import OmpAgentHarness, OmpAgentHarnessConfig
+from harness_bloat_bench.harnesses.claude_code import ClaudeCodeHarness, ClaudeCodeHarnessConfig
+from harness_bloat_bench.harnesses.codex_agent import CodexAgentHarness, CodexHarnessConfig
+from harness_bloat_bench.harnesses._common import openai_compat_model_config
 
 from .accounting import scrub
 from .config import TeamConfig
 from .gateway import AgentRoute
+
+
+EXISTING_ADAPTERS = {
+    "omp_agent": (OmpAgentHarness, OmpAgentHarnessConfig),
+    "claude_code_agent": (ClaudeCodeHarness, ClaudeCodeHarnessConfig),
+    "codex_agent": (CodexAgentHarness, CodexHarnessConfig),
+}
+
+
+def existing_adapter(config, env=None):
+    adapter, spec = EXISTING_ADAPTERS[config.harness.id]
+    return adapter(spec(id=config.harness.id, version=config.harness.version, env=env or {}))
 
 
 def configure_artifact_cache():
@@ -39,11 +59,12 @@ def configure_artifact_cache():
     target = Path(os.environ.get("MULTIAGENT_HARNESS_CACHE_DIR", str(original / "multiagent"))).resolve()
     target.mkdir(parents=True, exist_ok=True)
     # Release binaries are immutable; copying them does not invalidate recipes.
-    for source in original.glob("opencode/linux-*/*/opencode"):
-        destination = target / source.relative_to(original)
-        if not destination.exists():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+    for harness, filename in (("opencode", "opencode"), ("omp", "omp"), ("claude-code", "claude"), ("codex", "codex")):
+        for source in original.glob(f"{harness}/linux-*/*/{filename}"):
+            destination = target / source.relative_to(original)
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
     os.environ["HARNESS_BLOAT_CACHE_DIR"] = str(target)
     os.environ["MULTIAGENT_HARNESS_CACHE_DIR"] = str(target)
 
@@ -66,6 +87,9 @@ def prepare_artifact(config: TeamConfig) -> Path:
     arch = "x64" if config.sandbox.platform == "linux/amd64" else "arm64"
     if config.harness.id == "opencode":
         return ensure_opencode_cached(config.harness.version, config.harness.version, arch)
+    installers = {"omp_agent": ensure_omp_cached, "claude_code_agent": ensure_claude_cached, "codex_agent": ensure_codex_cached}
+    if config.harness.id in installers:
+        return installers[config.harness.id](config.harness.version, arch=arch)
     # Bullseye security packages have moved to the official Debian archive.
     mirror_setup = "sed -i 's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g;s|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list\n"
     return ensure_docker_built_tree(harness="hermes-agent", version=config.harness.version, source_dir=HERMES_DIR, install_script=mirror_setup + _install_script(config.harness.version), arch=arch)
@@ -228,6 +252,9 @@ fi
 
 
 async def setup_harness(config: TeamConfig, runtime: BenchRuntime, artifact: Path):
+    if config.harness.id in EXISTING_ADAPTERS:
+        await existing_adapter(config).setup(runtime, artifact=artifact)
+        return
     if config.harness.id == "opencode":
         await stage_cached_file(runtime, artifact, OPENCODE_BIN)
         check = await runtime.run([OPENCODE_BIN, "--version"], {})
@@ -251,13 +278,48 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
             raise ValueError("Native VBA runs require an executor route and no benchmark MCP connection")
         executor_endpoint = endpoint.replace(f"/agents/{route.agent_id}/", f"/agents/{executor.agent_id}/")
         env["BENCH_EXECUTOR_KEY"] = executor.token
+    if config.harness.id in EXISTING_ADAPTERS:
+        if not native:
+            raise ValueError("These adapters are wired only for native VBA runs")
+        # Reuse each adapter's stock CLI launch with one task prompt. Only model
+        # selection and isolated provider credentials differ from a single run.
+        trace = SimpleNamespace(id=route.agent_id, task=SimpleNamespace(data=SimpleNamespace(prompt=prompt, system_prompt=None)))
+        ctx = SimpleNamespace(model=route.model.model, client=SimpleNamespace(base_url=endpoint, api_key=route.token, headers={}))
+        extra = {}
+        if config.harness.id == "omp_agent":
+            agent_dir = f"/tmp/vf-omp-agent-{trace.id}"
+            models = openai_compat_model_config(endpoint=endpoint, api_key="VF_INTERCEPT_KEY")
+            models["providers"]["bench-executor"] = {"baseUrl": executor_endpoint, "api": "openai-completions",
+                                                      "apiKey": "BENCH_EXECUTOR_KEY", "models": [{"id": "agent"}]}
+            await runtime.write(agent_dir + "/config.yml", json.dumps({"task": {"agentModelOverrides": {
+                name: "bench-executor/agent" for name in ("task", "sonic", "scout", "designer", "reviewer", "security-reviewer", "librarian")
+            }}}).encode())
+            extra["model_config"] = models
+        elif config.harness.id == "claude_code_agent":
+            # The pinned release's SUBAGENT_MODEL overrides invocation and
+            # built-in agent model choices without replacing their prompts.
+            route.native_executor_model_alias = (executor.model.model if executor.model.model != route.model.model
+                                                 else "bench-native-executor")
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = route.native_executor_model_alias
+            for family in ("OPUS", "SONNET", "HAIKU"):
+                env[f"ANTHROPIC_DEFAULT_{family}_MODEL"] = route.native_executor_model_alias
+        else:
+            # Codex labels every spawned thread, including full-history forks,
+            # on its native provider requests. The relay selects the helper model
+            # from that identity while preserving its built-in roles and prompts.
+            route.native_executor_header = ("x-openai-subagent", "collab_spawn")
+            # Codex refuses to install its native helper binaries when its home
+            # is under /tmp. Keep fresh state in the disposable container's home.
+            env["CODEX_HOME"] = "/root/.bench-codex/" + route.agent_id
+            await runtime.write(env["CODEX_HOME"] + "/config.toml", b"")
+        return await existing_adapter(config, env).launch(ctx, trace, runtime, endpoint, route.token, {}, **extra)
     if config.harness.id == "opencode":
         provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": endpoint, "apiKey": "{env:" + credential + "}"}, "models": {"agent": {"name": route.model.model, "limit": {"context": 1048576, "output": route.model.max_output_tokens}}}}
         cli_config = {"provider": {"bench": provider}, "permission": {"*": "allow", "task": "deny"}, "tools": {"task": False}, "share": "disabled"}
         if native:
             executor_provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": executor_endpoint, "apiKey": "{env:BENCH_EXECUTOR_KEY}"}, "models": {"agent": {"name": executor.model.model, "limit": {"context": 1048576, "output": executor.model.max_output_tokens}}}}
             cli_config = {"provider": {"bench": provider, "bench-executor": executor_provider},
-                          "share": "disabled", "agent": {name: {"model": "bench-executor/agent", "steps": executor.model.max_calls}
+                          "share": "disabled", "agent": {name: {"model": "bench-executor/agent"}
                                                           for name in ("general", "explore")}}
         if mcp_url:
             cli_config["mcp"] = {"bench": {"type": "remote", "url": runtime.host_url(mcp_url), "timeout": 70000}}
@@ -275,7 +337,7 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
         if native:
             cli_config["delegation"] = {"model": executor.model.model, "base_url": executor_endpoint,
                                         "api_key": "${BENCH_EXECUTOR_KEY}", "api_mode": "chat_completions",
-                                        "reasoning_effort": executor.model.reasoning_effort, "max_iterations": executor.model.max_calls}
+                                        "reasoning_effort": executor.model.reasoning_effort}
         if mcp_url:
             cli_config["mcp_servers"] = {"bench": {"url": runtime.host_url(mcp_url)}}
         await runtime.write(state + "/config.yaml", json.dumps(cli_config).encode())

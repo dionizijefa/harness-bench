@@ -10,7 +10,7 @@ from verifiers.v1.harnesses.codex.harness import CODEX_BIN, CODEX_DIR
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.trace import Trace
 
-from harness_bloat_bench.harness_cache import ensure_codex_cached, stage_cached_file
+from harness_bench.harness_cache import ensure_codex_cached, stage_cached_file
 
 from ._common import release_version, run_install, shell_assignment
 

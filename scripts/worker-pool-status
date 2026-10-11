@@ -14,7 +14,7 @@ def main() -> None:
     settings = local_settings(Path(__file__).resolve().parent.parent)
     host = settings.get("HARNESS_BLOAT_CONTROL_HOST")
     if not host or host.startswith("-") or any(char.isspace() for char in host):
-        raise SystemExit("Set HARNESS_BLOAT_CONTROL_HOST in .dagster/worker-pool.env or the environment.")
+        raise SystemExit("Set HARNESS_BLOAT_CONTROL_HOST in .env or the environment.")
     project_dir = settings.get("HARNESS_BLOAT_REMOTE_PROJECT_DIR")
     if not project_dir:
         remote_home = subprocess.check_output(

@@ -32,6 +32,8 @@ class SandboxSpec(StrictConfig):
     task_memory_gb: dict[str, float] = Field(default_factory=dict)
     coordinator_cpus: float = Field(default=1, gt=0)
     coordinator_memory_gb: float = Field(default=2, gt=0)
+    shared_cpus: float = Field(default=4, gt=0)
+    shared_memory_gb: float = Field(default=5, gt=0)
 
     @model_validator(mode="after")
     def validate_memory(self):
@@ -43,17 +45,18 @@ class SandboxSpec(StrictConfig):
 class TeamConfig(StrictConfig):
     schema_version: Literal[1] = 1
     benchmark_type: Literal["multiagent"] = "multiagent"
+    execution_mode: Literal["shared_container", "isolated_tasks"] = "shared_container"
     name: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
     dataset: str = "terminal-bench/terminal-bench-2-1"
     task_ids: list[str] = Field(min_length=1)
     harness: HarnessSpec
     orchestrator: ModelSpec
     executor: ModelSpec
-    max_parallel_workers: int = Field(default=2, ge=1, le=16)
-    batch_timeout_seconds: float = Field(default=1200, gt=0, le=1200)
-    worker_timeout_seconds: float = Field(default=1200, gt=0, le=1200)
+    max_parallel_workers: int | None = Field(default=None, ge=1)
+    batch_timeout_seconds: float = Field(default=900, gt=0, le=1200)
+    worker_timeout_seconds: float = Field(default=900, gt=0, le=1200)
     grading_reserve_seconds: float = Field(default=90, gt=0)
-    max_cost_usd: float = Field(default=4, gt=0)
+    max_cost_usd: float | None = Field(default=None, gt=0)
     sandbox: SandboxSpec = Field(default_factory=SandboxSpec)
 
     @model_validator(mode="after")
@@ -64,6 +67,10 @@ class TeamConfig(StrictConfig):
             raise ValueError("task IDs must be Harbor task names")
         if self.grading_reserve_seconds >= min(self.batch_timeout_seconds, self.worker_timeout_seconds):
             raise ValueError("grading reserve must be shorter than both lifecycle deadlines")
+        if self.execution_mode == "shared_container":
+            supported = {"pypi-server", "fix-code-vulnerability", "qemu-startup", "sanitize-git-repo"}
+            if self.dataset != "terminal-bench/terminal-bench-2-1" or set(self.task_ids) != supported:
+                raise ValueError("shared_container requires the four-task Terminal-Bench pilot; other batches need an explicit combined environment recipe")
         return self
 
 

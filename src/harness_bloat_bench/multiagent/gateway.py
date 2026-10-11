@@ -91,7 +91,7 @@ class AgentRoute:
     task_id: str | None
     model: ModelSpec
     deadline: float
-    max_cost_usd: float
+    max_cost_usd: float | None
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     prior_outputs: dict[str, list] = field(default_factory=dict)
 
@@ -126,7 +126,7 @@ class Gateway:
                     tiers.extend([entry["pricing"], *entry["pricing"].get("overrides", [])])
         reservation = (len(json.dumps(body).encode()) + 4096) * max(float(t.get("prompt", pricing["prompt"])) for t in tiers) + route.model.max_output_tokens * max(float(t.get("completion", pricing["completion"])) for t in tiers)
         committed = sum(r.get("budget_charge_usd", r.get("reserved_cost_usd", 0)) for r in self.ledger.records.values() if r["team"] == route.team)
-        if committed + reservation > route.max_cost_usd:
+        if route.max_cost_usd is not None and committed + reservation > route.max_cost_usd:
             raise HTTPException(429, "Team cost admission ceiling reached")
         if path not in ("chat/completions", "responses"):
             raise HTTPException(404, "Unsupported model endpoint")

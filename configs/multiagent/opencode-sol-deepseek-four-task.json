@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "benchmark_type": "multiagent",
+  "execution_mode": "shared_container",
+  "name": "opencode-sol-deepseek-four-task",
+  "dataset": "terminal-bench/terminal-bench-2-1",
+  "task_ids": [
+    "pypi-server",
+    "fix-code-vulnerability",
+    "qemu-startup",
+    "sanitize-git-repo"
+  ],
+  "harness": {"id": "opencode", "version": "1.18.1"},
+  "orchestrator": {"model": "openai/gpt-6.1-sol", "reasoning_effort": "high", "max_output_tokens": 8192, "max_calls": 150, "api": "responses"},
+  "executor": {"model": "~deepseek/deepseek-v4-flash-latest", "reasoning_effort": "medium", "max_output_tokens": 8192, "max_calls": 150, "api": "chat"},
+  "max_parallel_workers": null,
+  "batch_timeout_seconds": 900,
+  "worker_timeout_seconds": 900,
+  "grading_reserve_seconds": 90,
+  "max_cost_usd": null,
+  "sandbox": {"image": "ubuntu:24.04", "platform": "linux/amd64", "shared_cpus": 4, "shared_memory_gb": 5}
+}

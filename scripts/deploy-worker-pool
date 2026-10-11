@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from _worker_pool_config import local_settings, parse_env
+from _worker_pool_config import local_settings, parse_env, update_env
 
 
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -383,19 +383,12 @@ def main() -> None:
         f"https://{tailscale_dns}/" if serve.returncode == 0
         else f"http://{tailscale_dns}:3210/"
     )
-    settings_path = repo_root / ".dagster" / "worker-pool.env"
-    private_settings = parse_env(settings_path.read_text(encoding="utf-8")) if settings_path.is_file() else {}
-    private_settings.update({
+    update_env(repo_root / ".env", {
         "HARNESS_BLOAT_CONTROL_HOST": host,
         "HARNESS_BLOAT_REMOTE_PROJECT_DIR": project_dir,
         "HARNESS_BLOAT_WORKER_NAME": worker_name,
         "HARNESS_BLOAT_UI_URL": ui_url,
     })
-    settings_path.write_text(
-        "".join(f"{key}={value}\n" for key, value in private_settings.items()),
-        encoding="utf-8",
-    )
-    settings_path.chmod(0o600)
     print(f"UI: {ui_url}")
     if serve.returncode != 0:
         print(

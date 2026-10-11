@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "benchmark_type": "multiagent",
+  "execution_mode": "isolated_tasks",
   "name": "opencode-sol-deepseek-two-task",
   "dataset": "terminal-bench/terminal-bench-2-1",
   "task_ids": ["torch-pipeline-parallelism", "pypi-server"],

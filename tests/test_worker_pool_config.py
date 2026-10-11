@@ -25,14 +25,14 @@ def load_script(name: str):
 def test_private_settings_precedence(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(SCRIPTS))
     config = load_script("_worker_pool_config.py")
-    (tmp_path / ".env").write_text("HOST=env-host\nPORT=3210\n")
-    (tmp_path / ".dagster").mkdir()
-    (tmp_path / ".dagster/worker-pool.env").write_text("HOST='private-host'\n")
+    (tmp_path / ".env").write_text("HOST='env-host'\nPORT=3210\n")
     monkeypatch.delenv("HOST", raising=False)
-    assert config.local_settings(tmp_path)["HOST"] == "private-host"
+    assert config.local_settings(tmp_path)["HOST"] == "env-host"
     monkeypatch.setenv("HOST", "exported-host")
     assert config.local_settings(tmp_path)["HOST"] == "exported-host"
     assert config.local_settings(tmp_path)["PORT"] == "3210"
+    config.update_env(tmp_path / ".env", {"HOST": "new-host", "WORKER": "worker-node"})
+    assert (tmp_path / ".env").read_text() == "HOST=new-host\nPORT=3210\nWORKER=worker-node\n"
 
 
 def test_rendered_config_uses_actual_path_and_user(tmp_path):
@@ -83,6 +83,8 @@ def test_deployment_discovers_and_saves_private_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(deploy, "__file__", str(tmp_path / "scripts/deploy-worker-pool"))
     monkeypatch.setattr(deploy, "local_settings", lambda _: {})
     monkeypatch.setattr(sys, "argv", ["deploy-worker-pool", "--host", "worker-alias"])
+    original_env = "# Existing credentials\nOPENROUTER_API_KEY=fake-test-value\n"
+    (tmp_path / ".env").write_text(original_env)
 
     def remote_output(host, command):
         assert host == "worker-alias"
@@ -105,7 +107,8 @@ def test_deployment_discovers_and_saves_private_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(deploy, "run", lambda command, **kwargs: commands.append((command, kwargs)))
     monkeypatch.setattr(deploy.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=1))
     deploy.main()
-    private_config = tmp_path / ".dagster/worker-pool.env"
+    private_config = tmp_path / ".env"
+    assert private_config.read_text().startswith(original_env)
     settings = deploy.parse_env(private_config.read_text())
     assert settings["HARNESS_BLOAT_CONTROL_HOST"] == "worker-alias"
     assert settings["HARNESS_BLOAT_REMOTE_PROJECT_DIR"] == "/home/worker/harness-bloat-bench"

@@ -1,4 +1,4 @@
-"""Two real CLI teams, isolated Harbor workers, unchanged graders, bounded execution."""
+"""Run harness teams with shared-container collaboration and independent graders."""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,7 @@ from .accounting import Ledger, scrub, utc_now
 from .config import TeamConfig, load_config
 from .gateway import AgentRoute, Gateway
 from .harnesses import BenchRuntime, configure_artifact_cache, launch_harness, prepare_artifact, setup_harness
+from .shared_environment import prepare_shared_image
 
 
 class Team:
@@ -42,7 +43,7 @@ class Team:
         self.active: dict[str, asyncio.Task] = {}
         self.rows = {task: {"task_id": task, "state": "not_delegated", "passed": None, "reward": None} for task in config.task_ids}
         self.runtimes: list[BenchRuntime] = []
-        self.semaphore = asyncio.Semaphore(config.max_parallel_workers)
+        self.semaphore = asyncio.Semaphore(config.max_parallel_workers) if config.max_parallel_workers is not None else contextlib.nullcontext()
         self.coordinator = {"agent_id": config.name + "-main", "role": "orchestrator", "state": "planned", "model": config.orchestrator.model}
         self.spawns = 0
         self.worker_intervals = []
@@ -253,6 +254,7 @@ class Team:
         passed = sum(row["passed"] is True for row in self.rows.values())
         return {
             "benchmark_type": "multiagent", "name": self.config.name,
+            "execution_mode": self.config.execution_mode,
             "protocol": "MCP batch delegation; same pinned harness for coordinator and isolated workers; native harness subagents disabled",
             "harness": self.config.harness.model_dump(),
             "orchestrator": {**self.coordinator, "usage": main_usage},
@@ -288,17 +290,22 @@ def write_report(output, results, elapsed, catalog, usage):
         rows.append(f'<tr><td>{name}</td><td>{result["passed_tasks"]}/{result["task_count"]}</td><td>{result["scored_tasks"]}</td><td>{cost}</td><td>{usage["total_tokens"]:,}</td><td>{result["max_observed_parallel_workers"]}</td><td>{result["worker_overlap_seconds"]:.1f}s</td><td>{html.escape(result["orchestrator"]["state"])}</td></tr>')
     agents = []
     for team in results:
-        for agent in [team["orchestrator"], *team["tasks"]]:
+        for agent in [team["orchestrator"], *team.get("workers", team["tasks"])]:
             usage = agent["usage"]
-            agents.append('<tr>' + ''.join(f'<td>{html.escape(str(value))}</td>' for value in [team["name"], agent.get("task_id", "coordinator"), agent.get("model", "—"), agent["state"], agent.get("verifier_state", "—"), usage["model_call_count"], usage["input_tokens"], usage["output_tokens"], usage["reasoning_tokens"], f'${usage["provider_cost_usd"]:.6f}', usage["calls_missing_cost"]]) + '</tr>')
+            agents.append('<tr>' + ''.join(f'<td>{html.escape(str(value))}</td>' for value in [team["name"], agent.get("agent_id", agent.get("task_id", "coordinator")), agent.get("model", "—"), agent["state"], agent.get("verifier_state", "—"), usage["model_call_count"], usage["input_tokens"], usage["output_tokens"], usage["reasoning_tokens"], f'${usage["provider_cost_usd"]:.6f}', usage["calls_missing_cost"]]) + '</tr>')
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multiagent harness pilot</title><style>body{font:15px/1.6 system-ui;margin:40px auto;padding:0 24px;max-width:1300px;color:#18394c;background:#fbfaf6}h1{font-size:36px}table{width:100%;border-collapse:collapse;background:white;margin:24px 0}th,td{text-align:left;padding:12px;border-bottom:1px solid #dde3e3}th{background:#edf2ef}p{max-width:1000px}.scroll{overflow:auto}a{color:#176582}</style><h1>Multiagent harness pilot</h1>'''
-    page += f'<p>Comparison wall time: {elapsed:.1f}s. One GPT-6.1 Sol high-effort coordinator per harness; cheap executor workers in separate containers. Independent hidden Harbor graders determine each task outcome. The complete comparison has a {manifest["overall_timeout_seconds"]:.0f}-second execution cap; team and worker limits are recorded in the frozen configs. Cleanup follows.</p>'
-    page += '<p>Protocol: both harnesses use the same MCP batch-delegation tools. Workers run real pinned Hermes/OpenCode CLIs. Native harness subagents are disabled. GPT coordinator calls are translated from Chat to Responses; native worker streams pass through unchanged. All upstream calls use cancellable streams, with billing reconciliation by generation ID. This pilot measures this configured team protocol, with one repetition, and cannot establish a general best harness.</p>'
+    page += f'<p>Comparison wall time: {elapsed:.1f}s. Independent hidden Harbor graders determine each task outcome. The complete comparison has a {manifest["overall_timeout_seconds"]:.0f}-second execution cap; models, execution modes and limits are recorded in the frozen configs. Cleanup follows.</p>'
+    page += '<p>Shared-container protocol: one orchestrator and its helpers have terminal/file access to the same container and all task state. Helpers report work to the orchestrator; its final exit submits the whole batch. Agents stop before the original task graders run sequentially. The combined OS/dependency environment differs from standalone Terminal-Bench images. Legacy isolated-task runs are explicitly identified by their execution mode. Both modes use benchmark MCP delegation with real pinned harness CLIs; native harness subagents are disabled. All model calls use cancellable streams and per-agent accounting. This pilot does not establish a general best harness.</p>'
     environment = manifest.get("environment", {})
     if environment:
         page += '<p>Local execution environment: ' + html.escape(json.dumps(environment)) + '. Container architecture differing from host/Docker architecture uses emulation; this can affect runtime and completion.</p>'
     page += '<div class="scroll"><table><tr><th>Team</th><th>Passes</th><th>Scored</th><th>Total cost</th><th>Tokens</th><th>Parallel workers</th><th>Overlap</th><th>Coordinator</th></tr>' + ''.join(rows) + '</table></div>'
     page += '<h2>Per-agent accounting</h2><div class="scroll"><table><tr><th>Team</th><th>Task / role</th><th>Model</th><th>Execution</th><th>Grader</th><th>Calls</th><th>Input</th><th>Output</th><th>Reasoning</th><th>Provider cost</th><th>Calls missing cost</th></tr>' + ''.join(agents) + '</table></div>'
+    grades = []
+    for team in results:
+        for task in team["tasks"]:
+            grades.append('<tr>' + ''.join(f'<td>{html.escape(str(value))}</td>' for value in [team["name"], task["task_id"], task.get("verifier_state", "unscored"), task.get("reward"), task.get("error", "")]) + '</tr>')
+    page += '<h2>Task grades</h2><div class="scroll"><table><tr><th>Team</th><th>Task</th><th>Grader</th><th>Reward</th><th>Error</th></tr>' + ''.join(grades) + '</table></div>'
     page += '<p>Input counts include cached tokens; output counts include reasoning tokens. Missing usage or billing is explicitly reported; known provider spend is a lower bound when calls are unaccounted. Price estimates are stored separately. Setup and model availability preflight happen before the paid-run clock; sandbox setup, model work, and grading share its deadline.</p><p><a href="comparison.json">Comparison JSON</a> · <a href="manifest.json">Frozen configs and limits</a> · <a href="events.jsonl">Lifecycle events</a> · <a href="model-catalog.json">Model price snapshot</a> · <a href="multiagent.sqlite">Per-call accounting database</a></p></html>'
     (output / "report.html").write_text(page)
 
@@ -315,7 +322,7 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
         raise ValueError("Requested models unavailable: " + ", ".join(sorted(missing)))
     catalog = {model: {key: available[model].get(key) for key in ("id", "name", "pricing", "context_length", "supported_parameters")} for model in sorted(names)}
     (output / "model-catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
-    manifest = {"benchmark_type": "multiagent", "created_at": utc_now(), "overall_timeout_seconds": overall_timeout, "configs": [config.model_dump() for config in configs], "protocol": "mcp_batch_delegation", "statistics_database": "multiagent.sqlite", "single_agent_statistics_imported": False}
+    manifest = {"benchmark_type": "multiagent", "created_at": utc_now(), "overall_timeout_seconds": overall_timeout, "configs": [config.model_dump() for config in configs], "protocols": {config.name: config.execution_mode for config in configs}, "statistics_database": "multiagent.sqlite", "single_agent_statistics_imported": False}
     manifest["config_sha256"] = hashlib.sha256(json.dumps(manifest["configs"], sort_keys=True).encode()).hexdigest()
     manifest["implementation_sha256"] = {}
     for path in sorted(Path(__file__).parent.glob("*.py")):
@@ -328,7 +335,7 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"event": "preparing", "output": str(output), "teams": [config.name for config in configs]}), flush=True)
     configure_artifact_cache()
-    artifacts, tasksets = {}, {}
+    artifacts, tasksets, shared_images = {}, {}, {}
     manifest["images"] = {}
     for config in configs:
         artifacts[config.name] = await asyncio.to_thread(prepare_artifact, config)
@@ -338,7 +345,10 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
         tasksets[config.name] = {task.data.name.rsplit("/", 1)[-1]: task for task in loaded}
         if set(tasksets[config.name]) != set(config.task_ids):
             raise ValueError("Dataset did not resolve exactly the requested task IDs")
-        for image in {config.sandbox.image, *(task.data.image or config.sandbox.image for task in loaded)}:
+        images = {task.data.image or config.sandbox.image for task in loaded}
+        if config.execution_mode == "isolated_tasks":
+            images.add(config.sandbox.image)
+        for image in images:
             check = await docker("image", "inspect", image)
             if check.exit_code:
                 check = await docker("pull", "--platform", config.sandbox.platform, image)
@@ -347,6 +357,12 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
                 check = await docker("image", "inspect", image)
             image_info = json.loads(check.stdout)[0]
             manifest["images"][image] = {field: image_info.get(field) for field in ("Id", "RepoDigests", "Architecture", "Os")}
+        if config.execution_mode == "shared_container":
+            shared_images[config.name] = await prepare_shared_image(config, tasksets[config.name], manifest["images"], output)
+            check = await docker("image", "inspect", shared_images[config.name])
+            image_info = json.loads(check.stdout)[0]
+            manifest["images"][shared_images[config.name]] = {field: image_info.get(field) for field in ("Id", "RepoDigests", "Architecture", "Os")}
+    manifest["shared_images"] = shared_images
     info = await docker("info", "--format", "{{json .}}")
     docker_info = json.loads(info.stdout) if info.exit_code == 0 else {}
     manifest["environment"] = {"host_system": platform.system(), "host_architecture": platform.machine(), "docker_architecture": docker_info.get("Architecture"), "docker_cpus": docker_info.get("NCPU"), "docker_memory_gb": round(docker_info.get("MemTotal", 0) / 2**30, 2), "docker_version": docker_info.get("ServerVersion"), "container_platforms": sorted({config.sandbox.platform for config in configs})}
@@ -356,7 +372,7 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
             continue
         probe = "mab-preflight-" + uuid4().hex[:8]
         try:
-            check = await docker("run", "--detach", "--platform", config.sandbox.platform, "--name", probe, "--entrypoint", "sleep", config.sandbox.image, "30")
+            check = await docker("run", "--detach", "--platform", config.sandbox.platform, "--name", probe, "--entrypoint", "sleep", shared_images.get(config.name, config.sandbox.image), "30")
             if check.exit_code:
                 raise RuntimeError("Platform preflight failed: " + check.stderr[-1000:])
             processes = await docker("top", probe, "-eo", "pid,args")
@@ -372,7 +388,11 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
     gateway = Gateway(key, ledger, available)
     started = time.monotonic()
     deadline = started + overall_timeout
-    teams = [Team(config, output, ledger, gateway, artifacts[config.name], tasksets[config.name], min(deadline, started + config.batch_timeout_seconds)) for config in configs]
+    from .shared import SharedTeam
+    teams = []
+    for config in configs:
+        args = (config, output, ledger, gateway, artifacts[config.name], tasksets[config.name], min(deadline, started + config.batch_timeout_seconds))
+        teams.append(SharedTeam(*args, shared_image=shared_images[config.name]) if config.execution_mode == "shared_container" else Team(*args))
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("mcp").setLevel(logging.WARNING)
     @asynccontextmanager
@@ -404,7 +424,10 @@ async def run_configs(configs: list[TeamConfig], output: Path, key: str, overall
             statuses = []
             for team in teams:
                 usage = ledger.summarize(team=team.config.name)
-                statuses.append({"name": team.config.name, "coordinator": team.coordinator["state"], "workers": {task: row["state"] for task, row in team.rows.items()}, "calls": usage["model_call_count"], "tokens": usage["total_tokens"], "provider_cost_usd": usage["provider_cost_usd"]})
+                statuses.append({"name": team.config.name, "coordinator": team.coordinator["state"], "phase": getattr(team, "phase", None),
+                                 "tasks": {task: row["state"] for task, row in team.rows.items()},
+                                 "workers": {agent: row["state"] for agent, row in getattr(team, "workers", team.rows).items()},
+                                 "calls": usage["model_call_count"], "tokens": usage["total_tokens"], "provider_cost_usd": usage["provider_cost_usd"]})
             print(json.dumps({"event": "progress", "elapsed_seconds": round(time.monotonic() - started, 1), "teams": statuses}), flush=True)
     monitoring = asyncio.create_task(progress())
     try:
@@ -459,7 +482,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, action="append", required=True, help="Fresh standalone multiagent JSON; repeat for concurrent teams")
     parser.add_argument("--output", type=Path, default=Path("outputs/multiagent") / (time.strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]))
-    parser.add_argument("--overall-timeout-seconds", type=float, default=1200)
+    parser.add_argument("--overall-timeout-seconds", type=float, default=900)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     if not 0 < args.overall_timeout_seconds <= 1200:
@@ -467,7 +490,7 @@ def main():
     configs = [load_config(path) for path in args.config]
     if len({config.name for config in configs}) != len(configs):
         parser.error("Team names must be unique")
-    if len({json.dumps({"tasks": config.task_ids, "dataset": config.dataset, "orchestrator": config.orchestrator.model_dump(), "executor": config.executor.model_dump()}, sort_keys=True) for config in configs}) > 1:
+    if len({json.dumps({"tasks": config.task_ids, "dataset": config.dataset, "execution_mode": config.execution_mode, "orchestrator": config.orchestrator.model_dump(), "executor": config.executor.model_dump()}, sort_keys=True) for config in configs}) > 1:
         parser.error("Comparison teams must use identical tasks and model settings")
     key = os.environ.get("MULTIAGENT_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
     if not key and not args.prepare_only:

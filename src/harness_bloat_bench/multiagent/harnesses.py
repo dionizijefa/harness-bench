@@ -15,7 +15,7 @@ from pathlib import Path
 from verifiers.v1.runtimes import DockerConfig, DockerRuntime, ProgramResult
 from verifiers.v1.runtimes.docker import docker
 
-from harness_bloat_bench.harness_cache import (
+from harness_bench.harness_cache import (
     CONTAINER_CACHE_ROOT,
     cache_root,
     ensure_docker_built_tree,
@@ -24,8 +24,8 @@ from harness_bloat_bench.harness_cache import (
     stage_cached_file,
     stage_cached_tree,
 )
-from harness_bloat_bench.harnesses.hermes_agent import HERMES_BIN, HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, _install_script
-from harness_bloat_bench.harnesses.opencode import OPENCODE_BIN
+from harness_bench.harnesses.hermes_agent import HERMES_BIN, HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, _install_script
+from harness_bench.harnesses.opencode import OPENCODE_BIN
 
 from .accounting import scrub
 from .config import TeamConfig

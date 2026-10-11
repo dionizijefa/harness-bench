@@ -9,54 +9,101 @@ one Verifiers rollout.
 
 ## Independent multiagent pilot
 
-The multiagent runner has its own strict configs under `configs/multiagent/`,
-artifact cache, output directories, and SQLite accounting database. It never
-launches or imports single-agent campaigns. Each real Hermes/OpenCode coordinator
-uses GPT-6.1 Sol with high reasoning, receives the same task batch, and calls a
-shared MCP delegation tool to launch cheap DeepSeek Flash workers. Each worker
-runs the same pinned harness in an isolated Docker container. Native harness
-subagents are disabled; this is a comparison of the shared batch-delegation
-protocol, rather than native delegation implementations.
+The four-task pilot runs **one orchestrator and all of its helpers in one Docker
+container per team configuration**. The orchestrator receives all four task
+prompts and has terminal/file access to every task, file, and running service.
+It can work directly, delegate subtasks, inspect changes, and request follow-up
+work. Hermes and OpenCode use the same benchmark MCP tools with their pinned
+CLIs; native harness subagents are disabled so executor routing and accounting
+remain controlled by the runner.
 
 With Docker running, set `MULTIAGENT_OPENROUTER_API_KEY` in the environment
-(`OPENROUTER_API_KEY` is also accepted), then run both fresh configurations:
+(`OPENROUTER_API_KEY` is also accepted), then run:
 
 ```sh
 uv run python scripts/run_multiagent_bench.py \
-  --config configs/multiagent/hermes-sol-deepseek-two-task.json \
-  --config configs/multiagent/opencode-sol-deepseek-two-task.json
+  --config configs/multiagent/hermes-sol-deepseek-four-task.json \
+  --config configs/multiagent/opencode-sol-deepseek-four-task.json
 ```
 
-The complete comparison and each team have a 1,200-second execution ceiling,
-including sandbox setup, model execution, and grading. Each worker also has a
-1,200-second lifecycle limit, bounded by the remaining team deadline. The last
-90 seconds are reserved for grading. Artifact preparation and image downloads
-happen before this clock; bounded container cleanup follows it. Both harnesses
-run concurrently, and each coordinator must actually request its two workers.
-The local configs cap each Torch worker at 3 GiB, each PyPI worker at 2 GiB,
-and each coordinator at 2 GiB; this differs from the historical server profile.
-Containers have separate bridge network addresses so both PyPI tasks can bind port 8080.
+Each configuration uses `execution_mode: "shared_container"`. The runner builds
+and caches a combined image from the original task images before starting the
+clock. It preserves the Bottle repository at `/app`, the Git repository at
+`/app/dclm`, and QEMU's `/app/alpine.iso` and disk image. PyPI work has its own
+`/app/pypi` directory and Python 3.13 environment at `/opt/bench-pypi`; Bottle
+keeps Python 3.11. The tasks are `pypi-server`, `fix-code-vulnerability`,
+`qemu-startup`, and `sanitize-git-repo`. Torch parallelism is excluded.
+The shared image intentionally combines OS dependencies; this is a new batch
+protocol, not an unchanged standalone Terminal-Bench environment. Other task
+batches need an explicit environment recipe rather than silently mixing images.
 
-`outputs/multiagent/<run>/report.html` shows independent grader outcomes, per-agent
-tokens and provider costs, worker overlap, and coordinator overhead. The same
-directory contains frozen configs and runner source snapshots with hashes, the local resource profile,
-a live price snapshot, per-call request/response
-traces, lifecycle events, and `multiagent.sqlite`. Costs and tokens survive partial
-failures; missing provider usage is explicitly marked incomplete. Known spend,
-price estimates, and actual billed cost are separate. Cache and reasoning tokens
-are recorded without double counting. The relay uses Responses for GPT-6.1 tool
-calls, translating CLI Chat requests. Worker streams pass through unchanged.
-All upstream calls use cancellable streams; captured generation IDs allow billing
-reconciliation after cancellation. API keys remain in the host environment and
-are never forwarded to agents.
+The orchestrator has these collaboration and service tools:
 
-Each team has a $4 cost admission ceiling and per-agent call/output limits.
-Admission reserves a conservative request cost from the price snapshot before
-sending concurrent calls; calls with unknown billing keep their reservation.
-`--overall-timeout-seconds` can shorten the comparison, and `--prepare-only`
-warms artifacts/images without making model calls. Output directories must be new,
-so separate runs cannot overwrite earlier evidence. These two tasks and one
-repetition screen configurations; they do not establish a general harness ranking.
+- `spawn_subagent(instructions, task_id?)` starts a helper in the same container.
+  It may delegate any subtask, launch multiple helpers for a task, and spawn
+  additional helpers to revise earlier work. The task ID supplies the original
+  requirements and an initial working directory; it does not restrict access.
+- `wait_for_subagents(agent_ids?, wait_seconds=60)` returns helper outputs and
+  execution states. Completed helpers do not trigger hidden grading.
+- `stop_subagent(agent_id)` stops a helper while keeping its filesystem changes.
+- `start_service(command, workdir="/app")` launches a persistent service such as
+  PyPI or QEMU outside any agent process tree, with a separate log. Supply a
+  foreground command; check readiness with the terminal tools.
+- `stop_service(service_id)` stops a service before replacing it.
+- `team_status()` reports helper progress, services, time remaining and usage.
+
+The orchestrator's final answer and CLI exit submit the **whole batch**. The
+runner closes model routes and stops remaining agent processes and foreground
+commands, including native terminal commands launched in separate process
+groups, then runs each task's original `test.sh` sequentially in the same
+container. Use `start_service` for persistent services: harness-managed
+background commands can be cleaned up on agent exit. Helpers can return startup
+commands for the orchestrator to launch. Runner-managed services survive through
+grading, and the container is removed afterward. Hidden tests are staged
+only after agents stop; `/tests` and `/logs/verifier` are cleared between tasks,
+and each task's reward, test report and logs are saved separately. Bottle's
+verifier runs from `/app`, with the other task directories excluded from its
+repository test discovery. Missing/malformed rewards and grader timeouts are
+reported as errors/unscored rather than passes. Pass rate is verified passes
+out of all four tasks.
+
+The complete comparison and each batch have a **900-second (15-minute) cap**,
+including container/harness setup, agent work and grading. The final 90 seconds
+are reserved for grading; early submission makes the remaining time available
+for grading too. Sequential graders share the remaining time so a stalled grader
+cannot consume every later task's opportunity. Build/download preflight happens
+before the clock; bounded container cleanup follows it. There is **no worker
+concurrency cap or dollar cap** (`max_parallel_workers` and `max_cost_usd` are
+`null`). Per-agent call/output limits still apply. The shared container is
+configured for four CPUs and 5 GiB; all agents and task services share those
+resources. The two harness configurations run concurrently in separate team
+containers, so their services can use the same ports.
+
+`outputs/multiagent/<run>/report.html` shows task grades, per-agent tokens and
+costs, worker overlap and coordinator overhead. The run directory contains frozen
+configs, source hashes, combined-image recipes/source digests, lifecycle events,
+per-agent traces and `multiagent.sqlite`. Shared helper costs are recorded by
+agent and team, without pretending they are attributable to a single task.
+Provider spend, estimates, cached tokens and reasoning tokens remain separate;
+missing billing is explicitly marked incomplete and cancelled calls are reconciled
+by generation ID. Provider credentials stay on the host; agents receive only
+scoped relay credentials.
+
+`--prepare-only` prepares images and harness artifacts without making model
+calls. `--overall-timeout-seconds` can shorten the run. Output directories must be
+new. Numeric concurrency/cost caps remain available for optional experiments;
+omitted or `null` values mean uncapped. The older `*-two-task.json` configs are
+explicitly marked `execution_mode: "isolated_tasks"` and retain the historical
+dispatch-only smoke protocol and limits. Their original 1,200-second timing
+requires `--overall-timeout-seconds 1200`.
+
+Run the unit checks with `uv run --group dev pytest tests/test_multiagent.py
+tests/test_multiagent_shared.py`. Opt-in Docker lifecycle checks use
+`MULTIAGENT_DOCKER_TEST_IMAGE=ubuntu:24.04` with
+`tests/test_multiagent_shared_docker.py`. Set `MULTIAGENT_NATIVE_SMOKE=1` and run
+`tests/test_multiagent_shared_native.py` to exercise both pinned CLIs, helper
+delegation, shared edits, persistent services and grading against a local scripted
+model server. These smoke checks make no paid model calls.
 
 The original five-task selection is reproducible offline from
 [`analysis/task-selection-input.json`](analysis/task-selection-input.json), which
@@ -77,7 +124,7 @@ rows reconstruct 95.3% of total matrix variance and retain 79.1% of its harness
 contrasts; held-out prediction on
 unmeasured tasks reaches 48.3%. These results motivate a screening set and do not
 validate a multiagent harness ranking. The report preserves the original proposed
-five-task protocol; the implemented two-task protocol is defined by the fresh
+five-task protocol; the implemented mixed-model delegation protocol is defined by the
 configs above. Raw rollout records, general exports, charts, and generated reports
 are excluded from Git; reproduction writes outputs under `outputs/analysis/`.
 
@@ -87,7 +134,7 @@ are excluded from Git; reproduction writes outputs under `outputs/analysis/`.
 
 The production Dagster control plane runs on the configured remote worker.
 Keep the SSH host, project directory, worker name, and UI address in the ignored
-`.dagster/worker-pool.env` file or `.env`, or export the corresponding variables:
+`.env` file, or export the corresponding variables:
 
 ```sh
 HARNESS_BLOAT_CONTROL_HOST=worker-host
@@ -96,10 +143,10 @@ HARNESS_BLOAT_WORKER_NAME=rollout-worker
 HARNESS_BLOAT_UI_URL=https://worker.example/
 ```
 
-Exported variables take precedence over `.dagster/worker-pool.env`, which takes
-precedence over `.env`. Only the SSH host is required. Deployment discovers the
+Exported variables take precedence over `.env`. Only the SSH host is required. Deployment discovers the
 worker's home directory, hostname, and Tailscale UI address when these settings
-are omitted, and saves the resulting settings in `.dagster/worker-pool.env`.
+are omitted, and saves the resulting settings in `.env`, preserving existing
+credentials and comments.
 Open the private URL printed by deployment or `./scripts/worker-pool-status`
 from a device signed in to the worker's tailnet.
 

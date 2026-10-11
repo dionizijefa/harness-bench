@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "benchmark_type": "multiagent",
+  "scoring": "task",
   "execution_mode": "shared_container",
   "name": "opencode-sol-deepseek-four-task",
   "dataset": "terminal-bench/terminal-bench-2-1",

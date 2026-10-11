@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .vba_rubric import DATASET, TASK_ID
+
 
 class StrictConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -47,17 +49,26 @@ class TeamConfig(StrictConfig):
     benchmark_type: Literal["multiagent"] = "multiagent"
     execution_mode: Literal["shared_container", "isolated_tasks"] = "shared_container"
     name: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
-    dataset: str = "terminal-bench/terminal-bench-2-1"
-    task_ids: list[str] = Field(min_length=1)
+    dataset: str = DATASET
+    task_ids: list[str] = Field(default_factory=lambda: [TASK_ID], min_length=1)
+    scoring: Literal["vba_subtasks_v1", "task"] = "vba_subtasks_v1"
     harness: HarnessSpec
     orchestrator: ModelSpec
     executor: ModelSpec
     max_parallel_workers: int | None = Field(default=None, ge=1)
-    batch_timeout_seconds: float = Field(default=900, gt=0, le=1200)
-    worker_timeout_seconds: float = Field(default=900, gt=0, le=1200)
-    grading_reserve_seconds: float = Field(default=90, gt=0)
+    batch_timeout_seconds: float = Field(default=4500, gt=0, le=29700)
+    worker_timeout_seconds: float = Field(default=900, gt=0, le=28800)
+    grading_reserve_seconds: float = Field(default=3600, gt=0)
     max_cost_usd: float | None = Field(default=None, gt=0)
     sandbox: SandboxSpec = Field(default_factory=SandboxSpec)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_historical_scoring(cls, value):
+        # Frozen schema-v1 configs from the 2.1 pilot predate this field.
+        if isinstance(value, dict) and "scoring" not in value and value.get("dataset", DATASET) != DATASET:
+            return {**value, "scoring": "task"}
+        return value
 
     @model_validator(mode="after")
     def validate_team(self):
@@ -65,12 +76,19 @@ class TeamConfig(StrictConfig):
             raise ValueError("task IDs must be unique")
         if any(not task or "/" in task or ".." in task for task in self.task_ids):
             raise ValueError("task IDs must be Harbor task names")
-        if self.grading_reserve_seconds >= min(self.batch_timeout_seconds, self.worker_timeout_seconds):
-            raise ValueError("grading reserve must be shorter than both lifecycle deadlines")
-        if self.execution_mode == "shared_container":
+        if self.grading_reserve_seconds >= self.batch_timeout_seconds:
+            raise ValueError("grading reserve must be shorter than the batch deadline")
+        # Shared helpers only do agent work; grading happens after they stop.
+        # Legacy isolated workers include their own grader in their deadline.
+        if self.execution_mode == "isolated_tasks" and self.grading_reserve_seconds >= self.worker_timeout_seconds:
+            raise ValueError("grading reserve must be shorter than the isolated worker deadline")
+        if self.scoring == "vba_subtasks_v1":
+            if self.dataset != DATASET or self.task_ids != [TASK_ID] or self.execution_mode != "shared_container":
+                raise ValueError("vba_subtasks_v1 requires shared_container and the pinned Terminal-Bench 4.0 vba-userform-port task")
+        elif self.execution_mode == "shared_container":
             supported = {"pypi-server", "fix-code-vulnerability", "qemu-startup", "sanitize-git-repo"}
             if self.dataset != "terminal-bench/terminal-bench-2-1" or set(self.task_ids) != supported:
-                raise ValueError("shared_container requires the four-task Terminal-Bench pilot; other batches need an explicit combined environment recipe")
+                raise ValueError("Legacy task scoring in shared_container requires the four-task Terminal-Bench 2.1 pilot")
         return self
 
 

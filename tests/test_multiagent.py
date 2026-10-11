@@ -16,7 +16,7 @@ from verifiers.v1.runtimes import ProgramResult
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "configs/multiagent/hermes-sol-deepseek-two-task.json"
+CONFIG = ROOT / "configs/multiagent/legacy/hermes-sol-deepseek-two-task.json"
 
 
 def test_provider_cost_is_not_estimated_or_reasoning_double_counted():
@@ -64,7 +64,7 @@ def test_gpt_tool_calls_use_responses_with_prior_reasoning():
 
 def test_comparison_configs_are_fresh_and_matching():
     hermes = load_config(CONFIG)
-    opencode = load_config(ROOT / "configs/multiagent/opencode-sol-deepseek-two-task.json")
+    opencode = load_config(ROOT / "configs/multiagent/legacy/opencode-sol-deepseek-two-task.json")
     assert hermes.task_ids == opencode.task_ids
     assert hermes.orchestrator == opencode.orchestrator
     assert hermes.executor == opencode.executor

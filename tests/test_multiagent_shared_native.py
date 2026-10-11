@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("setup_mode", ["multiagent", "singleagent"])
 def test_hermes_setup_preserves_task_python_and_ssl(tmp_path, monkeypatch, setup_mode):
     async def scenario():
-        config = load_config(ROOT / "configs/multiagent/hermes-sol-deepseek-four-task.json")
+        config = load_config(ROOT / "configs/multiagent/legacy/hermes-sol-deepseek-four-task.json")
         configure_artifact_cache()
         artifact = await asyncio.to_thread(prepare_artifact, config)
         runtime = BenchRuntime(DockerConfig(image=os.environ["MULTIAGENT_SHARED_TEST_IMAGE"], workdir="/app", cpu=4, memory=5),
@@ -59,7 +59,7 @@ def test_hermes_setup_preserves_task_python_and_ssl(tmp_path, monkeypatch, setup
 @pytest.mark.parametrize("harness", ["hermes", "opencode"])
 def test_native_orchestrator_delegates_reviews_and_submits_shared_state(tmp_path, harness):
     async def scenario():
-        config = load_config(ROOT / f"configs/multiagent/{harness}-sol-deepseek-four-task.json")
+        config = load_config(ROOT / f"configs/multiagent/legacy/{harness}-sol-deepseek-four-task.json")
         config.grading_reserve_seconds = 30
         configure_artifact_cache()
         artifact = await asyncio.to_thread(prepare_artifact, config)

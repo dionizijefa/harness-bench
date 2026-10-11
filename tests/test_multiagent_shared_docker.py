@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_shared_processes_services_and_sequential_harbor_graders(tmp_path, monkeypatch):
     async def scenario():
-        config = load_config(ROOT / "configs/multiagent/hermes-sol-deepseek-four-task.json")
+        config = load_config(ROOT / "configs/multiagent/legacy/hermes-sol-deepseek-four-task.json")
         ledger = Ledger(tmp_path)
         gateway = SimpleNamespace(routes={}, inflight={})
         gateway.register = lambda route: gateway.routes.update({route.agent_id: route})

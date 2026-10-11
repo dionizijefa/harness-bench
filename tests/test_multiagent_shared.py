@@ -17,7 +17,7 @@ from harness_bloat_bench.multiagent.shared_environment import TASK_WORKDIRS, com
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "configs/multiagent/hermes-sol-deepseek-four-task.json"
+CONFIG = ROOT / "configs/multiagent/legacy/hermes-sol-deepseek-four-task.json"
 
 
 class FakeContainer:
@@ -221,7 +221,7 @@ def test_stalled_grader_leaves_time_for_later_tasks(tmp_path, monkeypatch):
 @pytest.mark.parametrize("harness", ["hermes", "opencode"])
 def test_harness_enables_coordinator_terminal_and_uses_distinct_agent_state(tmp_path, harness):
     async def scenario():
-        config = load_config(ROOT / f"configs/multiagent/{harness}-sol-deepseek-four-task.json")
+        config = load_config(ROOT / f"configs/multiagent/legacy/{harness}-sol-deepseek-four-task.json")
         class Runtime:
             config = SimpleNamespace(workdir="/app/pypi")
             writes, calls = {}, []

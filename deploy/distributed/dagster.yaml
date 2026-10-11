@@ -1,3 +1,4 @@
+# Template: scripts/render-dagster-config.py fills in the local path and user.
 telemetry:
   enabled: false
 
@@ -53,10 +54,10 @@ run_launcher:
     container_kwargs:
       auto_remove: true
       init: true
-      user: "1000:1000"
+      user: "__RUN_USER__"
       volumes:
-        - /home/REMOTE_USER/harness-bloat-bench:/home/REMOTE_USER/harness-bloat-bench
-      working_dir: /home/REMOTE_USER/harness-bloat-bench
+        - "__PROJECT_VOLUME__"
+      working_dir: "__PROJECT_DIR__"
 
 run_monitoring:
   enabled: true

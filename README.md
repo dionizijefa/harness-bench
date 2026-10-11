@@ -85,10 +85,23 @@ are excluded from Git; reproduction writes outputs under `outputs/analysis/`.
 
 ## Durable distributed worker pool (recommended)
 
-The production Dagster control plane runs on `rollout-worker`, not on the
-Mac. Open its private UI from any device signed in to this tailnet:
+The production Dagster control plane runs on the configured remote worker.
+Keep the SSH host, project directory, worker name, and UI address in the ignored
+`.dagster/worker-pool.env` file or `.env`, or export the corresponding variables:
 
-<http://worker.example:3210/>
+```sh
+HARNESS_BLOAT_CONTROL_HOST=worker-host
+HARNESS_BLOAT_REMOTE_PROJECT_DIR=/srv/harness-bloat-bench
+HARNESS_BLOAT_WORKER_NAME=rollout-worker
+HARNESS_BLOAT_UI_URL=https://worker.example/
+```
+
+Exported variables take precedence over `.dagster/worker-pool.env`, which takes
+precedence over `.env`. Only the SSH host is required. Deployment discovers the
+worker's home directory, hostname, and Tailscale UI address when these settings
+are omitted, and saves the resulting settings in `.dagster/worker-pool.env`.
+Open the private URL printed by deployment or `./scripts/worker-pool-status`
+from a device signed in to the worker's tailnet.
 
 The URL is plain HTTP inside the end-to-end encrypted Tailscale network; port
 3210 is bound only to the server's Tailscale address. It does not require an
@@ -97,12 +110,13 @@ or remote worker. For a prettier HTTPS URL, grant the deployment user one-time
 Tailscale Serve permission on the server and redeploy:
 
 ```sh
-ssh tailscale 'sudo tailscale set --operator=REMOTE_USER'
+ssh worker-host 'sudo tailscale set --operator="$(id -un)"'
 ./scripts/deploy-worker-pool
 ```
 
-The resulting URL is `https://worker.example/`. The private
-HTTP URL remains the fallback when Serve permission has not been granted.
+Deployment prints the resulting HTTPS URL. The private HTTP URL remains the
+fallback when Serve permission has not been granted. Set `HARNESS_BLOAT_UI_URL`
+only if you want to override the discovered URL.
 
 Deploy or update the control plane with:
 
@@ -111,6 +125,11 @@ Deploy or update the control plane with:
 ./scripts/deploy-worker-pool
 ./scripts/worker-pool-status
 ```
+
+`--host`, `--project-dir`, and `--worker-name` override the saved deployment
+settings. Deployment and the local worker render `deploy/distributed/dagster.yaml`
+into their ignored runtime directories using the actual project path and user
+IDs, so the committed template contains no machine-specific paths.
 
 In the remote UI, launch `plan_terminal_bench_worker_pool_campaign`. The
 `terminal_bench_worker_pool_sensor` is kept running by the deployment script;

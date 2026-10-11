@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import secrets
 import shlex
 import sqlite3
@@ -13,6 +12,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
+from _worker_pool_config import local_settings, parse_env
+
 
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, check=True, **kwargs)
@@ -20,27 +21,6 @@ def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 def output(command: list[str]) -> str:
     return subprocess.check_output(command, text=True).strip()
-
-
-def parse_env(text: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
-
-
-def local_secret(repo_root: Path, name: str) -> str | None:
-    value = os.environ.get(name)
-    if value:
-        return value
-    env_path = repo_root / ".env"
-    if env_path.is_file():
-        return parse_env(env_path.read_text(encoding="utf-8")).get(name)
-    return None
 
 
 def remote_output(host: str, command: str) -> str:
@@ -147,11 +127,15 @@ target.chmod(0o600)
 
 
 def main() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    settings = local_settings(repo_root)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="tailscale")
+    parser.add_argument("--host", default=settings.get("HARNESS_BLOAT_CONTROL_HOST"))
     parser.add_argument(
-        "--project-dir", default="/home/REMOTE_USER/harness-bloat-bench"
+        "--project-dir", default=settings.get("HARNESS_BLOAT_REMOTE_PROJECT_DIR"),
+        help="Remote project directory (default: ~/harness-bloat-bench on the worker)",
     )
+    parser.add_argument("--worker-name", default=settings.get("HARNESS_BLOAT_WORKER_NAME"))
     parser.add_argument(
         "--initialize-state",
         action="store_true",
@@ -159,12 +143,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parent.parent
     host = args.host
-    project_dir = args.project_dir.rstrip("/")
+    if not host or host.startswith("-") or any(char.isspace() for char in host):
+        parser.error("set --host or HARNESS_BLOAT_CONTROL_HOST to a valid SSH host")
     run(["ssh", "--", host, "true"])
+    project_dir = args.project_dir
+    if not project_dir:
+        remote_home = remote_output(host, 'printf "%s" "$HOME"')
+        project_dir = f"{remote_home}/harness-bloat-bench"
+    project_dir = project_dir.rstrip("/")
+    if not project_dir.startswith("/") or any(char.isspace() for char in project_dir) or ":" in project_dir:
+        parser.error("project directory must be absolute, without whitespace or colons")
+    worker_name = args.worker_name or remote_output(host, "hostname")
+    if any(char in worker_name for char in "\r\n"):
+        parser.error("worker name cannot contain a newline")
 
-    run(["ssh", "--", host, "mkdir", "-p", project_dir])
+    run(["ssh", "--", host, f"mkdir -p -- {shlex.quote(project_dir)}"])
     run(
         [
             "rsync",
@@ -266,6 +260,7 @@ def main() -> None:
         "HARNESS_BLOAT_OBJECT_STORE_HOST_ENDPOINT": "http://127.0.0.1:9000",
         "HARNESS_BLOAT_OBJECT_STORE_INTERNAL_ENDPOINT": "http://minio:9000",
         "HARNESS_BLOAT_PROJECT_DIR": project_dir,
+        "HARNESS_BLOAT_WORKER_NAME": worker_name,
         "HOST_GID": host_gid,
         "HOST_UID": host_uid,
         "MINIO_ROOT_PASSWORD": minio_password,
@@ -280,7 +275,7 @@ def main() -> None:
         ),
         "TAILSCALE_IP": tailscale_ip,
     }
-    if api_key := local_secret(repo_root, "OPENROUTER_API_KEY"):
+    if api_key := settings.get("OPENROUTER_API_KEY"):
         values["OPENROUTER_API_KEY"] = api_key
     env_text = "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
 
@@ -323,7 +318,8 @@ def main() -> None:
     remote_setup = (
         f"cd {shlex.quote(project_dir)} && "
         "mkdir -p .dagster/distributed .worker-home outputs && "
-        "cp deploy/distributed/dagster.yaml .dagster/distributed/dagster.yaml"
+        "python3 scripts/render-dagster-config.py "
+        "--output .dagster/distributed/dagster.yaml"
     )
     run(["ssh", "--", host, remote_setup])
     if args.initialize_state:
@@ -383,10 +379,25 @@ def main() -> None:
         capture_output=True,
     )
     print("Worker pool deployed. Durable sensor started; legacy sensor stopped.")
-    if serve.returncode == 0:
-        print(f"UI: https://{tailscale_dns}/")
-    else:
-        print(f"UI: http://{tailscale_dns}:3210/")
+    ui_url = settings.get("HARNESS_BLOAT_UI_URL") or (
+        f"https://{tailscale_dns}/" if serve.returncode == 0
+        else f"http://{tailscale_dns}:3210/"
+    )
+    settings_path = repo_root / ".dagster" / "worker-pool.env"
+    private_settings = parse_env(settings_path.read_text(encoding="utf-8")) if settings_path.is_file() else {}
+    private_settings.update({
+        "HARNESS_BLOAT_CONTROL_HOST": host,
+        "HARNESS_BLOAT_REMOTE_PROJECT_DIR": project_dir,
+        "HARNESS_BLOAT_WORKER_NAME": worker_name,
+        "HARNESS_BLOAT_UI_URL": ui_url,
+    })
+    settings_path.write_text(
+        "".join(f"{key}={value}\n" for key, value in private_settings.items()),
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o600)
+    print(f"UI: {ui_url}")
+    if serve.returncode != 0:
         print(
             "Private HTTPS is optional; grant Tailscale Serve access once with "
             f"'sudo tailscale set --operator={remote_output(host, 'id -un')}'."

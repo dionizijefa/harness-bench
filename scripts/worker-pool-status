@@ -1,16 +1,40 @@
-#!/bin/sh
+#!/usr/bin/env python3
+"""Show worker pool status using private settings saved by deployment."""
 
-set -eu
+from __future__ import annotations
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$repo_root"
+import shlex
+import subprocess
+from pathlib import Path
 
-host="${HARNESS_BLOAT_CONTROL_HOST:-tailscale}"
-project_dir="${HARNESS_BLOAT_REMOTE_PROJECT_DIR:-/home/REMOTE_USER/harness-bloat-bench}"
+from _worker_pool_config import local_settings
 
-printf 'Dagster UI: http://worker.example:3210/\n\n'
-ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml ps"
-printf '\nSensors:\n'
-ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml exec -T code-server python -m dagster sensor list --grpc-host code-server --grpc-port 4000"
-printf '\nWorkers:\n'
-ssh -- "$host" "cd '$project_dir' && docker compose --env-file .dagster/distributed.env -f deploy/distributed/compose.yaml exec -T code-server python -m celery --app harness_bloat_bench.celery_app:app inspect ping --timeout 5"
+
+def main() -> None:
+    settings = local_settings(Path(__file__).resolve().parent.parent)
+    host = settings.get("HARNESS_BLOAT_CONTROL_HOST")
+    if not host or host.startswith("-") or any(char.isspace() for char in host):
+        raise SystemExit("Set HARNESS_BLOAT_CONTROL_HOST in .dagster/worker-pool.env or the environment.")
+    project_dir = settings.get("HARNESS_BLOAT_REMOTE_PROJECT_DIR")
+    if not project_dir:
+        remote_home = subprocess.check_output(
+            ["ssh", "--", host, 'printf "%s" "$HOME"'], text=True,
+        ).strip()
+        project_dir = f"{remote_home}/harness-bloat-bench"
+    if ui_url := settings.get("HARNESS_BLOAT_UI_URL"):
+        print(f"Dagster UI: {ui_url}\n", flush=True)
+    compose = (
+        f"cd {shlex.quote(project_dir)} && docker compose "
+        "--env-file .dagster/distributed.env -f deploy/distributed/compose.yaml"
+    )
+    for label, command in (
+        ("Containers", "ps"),
+        ("Sensors", "exec -T code-server python -m dagster sensor list --grpc-host code-server --grpc-port 4000"),
+        ("Workers", "exec -T code-server python -m celery --app harness_bloat_bench.celery_app:app inspect ping --timeout 5"),
+    ):
+        print(f"\n{label}:\n", flush=True)
+        subprocess.run(["ssh", "--", host, f"{compose} {command}"], check=True)
+
+
+if __name__ == "__main__":
+    main()

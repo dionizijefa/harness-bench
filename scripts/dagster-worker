@@ -22,7 +22,8 @@ esac
 dagster_home="$repo_root/.dagster/distributed-worker"
 worker_home="$repo_root/.worker-home-mac"
 mkdir -p "$dagster_home" "$worker_home" "$repo_root/.harness-cache"
-cp "$repo_root/deploy/distributed/dagster.yaml" "$dagster_home/dagster.yaml"
+python3 "$repo_root/scripts/render-dagster-config.py" \
+    --project-dir "$repo_root" --output "$dagster_home/dagster.yaml"
 
 image="${HARNESS_BLOAT_LOCAL_WORKER_IMAGE:-harness-bench-dagster-local:1.13.13}"
 docker build --quiet \

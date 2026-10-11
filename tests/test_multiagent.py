@@ -8,10 +8,10 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 
-from harness_bench.multiagent.accounting import Ledger, normalized_usage
-from harness_bench.multiagent.config import ModelSpec, load_config
-from harness_bench.multiagent.gateway import AgentRoute, Gateway, chat_to_responses, responses_to_chat
-from harness_bench.multiagent.runner import Team
+from harness_bloat_bench.multiagent.accounting import Ledger, normalized_usage
+from harness_bloat_bench.multiagent.config import ModelSpec, load_config
+from harness_bloat_bench.multiagent.gateway import AgentRoute, Gateway, chat_to_responses, responses_to_chat
+from harness_bloat_bench.multiagent.runner import Team
 from verifiers.v1.runtimes import ProgramResult
 
 
@@ -418,7 +418,7 @@ def test_stream_cancellation_recovers_provider_bill_and_closes_connection(tmp_pa
 
 
 def test_global_deadline_finalizes_one_consistent_team_record(tmp_path, monkeypatch):
-    from harness_bench.multiagent import runner
+    from harness_bloat_bench.multiagent import runner
     async def scenario():
         config = load_config(CONFIG)
         catalog = [{"id": spec.model, "pricing": {"prompt": "0", "completion": "0"}} for spec in (config.orchestrator, config.executor)]

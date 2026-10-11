@@ -84,6 +84,11 @@ costs, worker overlap and coordinator overhead. The run directory contains froze
 configs, source hashes, combined-image recipes/source digests, lifecycle events,
 per-agent traces and `multiagent.sqlite`. Shared helper costs are recorded by
 agent and team, without pretending they are attributable to a single task.
+Multiagent storage is separate from the single-agent campaign database at
+`outputs/results.sqlite`: each multiagent run owns its own
+`outputs/multiagent/<run>/multiagent.sqlite`. Model requests, response JSON,
+streamed responses, and CLI logs live under that run's `<team>/<agent_id>/`
+directory, with the model trajectories in `calls/`.
 Provider spend, estimates, cached tokens and reasoning tokens remain separate;
 missing billing is explicitly marked incomplete and cancelled calls are reconciled
 by generation ID. Provider credentials stay on the host; agents receive only
@@ -97,6 +102,26 @@ explicitly marked `execution_mode: "isolated_tasks"` and retain the historical
 dispatch-only smoke protocol and limits. Their original 1,200-second timing
 requires `--overall-timeout-seconds 1200`.
 
+`configs/multiagent/hermes-sol-max-luna-four-task.json` runs one Hermes team with
+Sol-6.1 at max effort and Luna at medium effort. This smoke configuration reserves
+240 seconds for the original graders' package installation and tests within the
+same 900-second batch cap.
+
+For an independent Luna-medium baseline on the same four tasks, use the existing
+single-agent job:
+
+```bash
+uv run dagster job execute -m harness_bloat_bench.definitions \
+  -j terminal_bench_rollouts -c configs/hermes-luna-medium-four-task.yaml
+```
+
+This runs four Hermes 0.20.0 rollouts concurrently in the original task images.
+Each container gets four CPUs and 5 GiB, and each agent gets 660 seconds;
+setup and grading use the single-agent runner's separate timeouts. Trajectories
+and `results.sqlite` live under `outputs/singleagent/hermes-luna-medium-four-task/`.
+The multiagent team shares one container and a total batch deadline, so these
+limits and the different task images should accompany performance comparisons.
+
 Run the unit checks with `uv run --group dev pytest tests/test_multiagent.py
 tests/test_multiagent_shared.py`. Opt-in Docker lifecycle checks use
 `MULTIAGENT_DOCKER_TEST_IMAGE=ubuntu:24.04` with
@@ -104,6 +129,8 @@ tests/test_multiagent_shared.py`. Opt-in Docker lifecycle checks use
 `tests/test_multiagent_shared_native.py` to exercise both pinned CLIs, helper
 delegation, shared edits, persistent services and grading against a local scripted
 model server. These smoke checks make no paid model calls.
+Set `MULTIAGENT_SHARED_TEST_IMAGE` to a prepared combined image to also verify
+that Hermes setup preserves the task container's Python and SSL runtime.
 
 The original five-task selection is reproducible offline from
 [`analysis/task-selection-input.json`](analysis/task-selection-input.json), which

@@ -162,14 +162,14 @@ class HermesAgentHarness(Harness[HermesAgentHarnessConfig]):
             source_dir=HERMES_DIR,
             install_script=_install_script(self.config.version),
         )
-        await stage_cached_tree(runtime, cached_tree, HERMES_DIR)
+        await stage_cached_tree(runtime, cached_tree, HERMES_DIR, writable=True)
         await run_install(
             runtime,
             "Hermes Agent",
             self.config.version,
             f"""\
 set -eu
-{install_cached_python_runtime_script(HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR)}
+{install_cached_python_runtime_script(HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, venv_dir=f"{HERMES_SOURCE_DIR}/venv")}
 test -x {shlex.quote(HERMES_BIN)}
 LD_LIBRARY_PATH={shlex.quote(HERMES_PYTHON_DEPENDENCY_DIR)} \
     {shlex.quote(HERMES_BIN)} --version >/dev/null

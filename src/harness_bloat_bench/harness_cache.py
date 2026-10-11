@@ -475,7 +475,7 @@ find /usr/local/lib/python3.11 -type f -name '*.so' -exec ldd {{}} \; 2>/dev/nul
 
 
 def install_cached_python_runtime_script(
-    source_dir: str, dependency_dir: str
+    source_dir: str, dependency_dir: str, *, venv_dir: str | None = None
 ) -> str:
     """Return an offline script that restores a composite bundle's Python.
 
@@ -483,15 +483,25 @@ def install_cached_python_runtime_script(
     image provides. Keep those libraries private to the harness process: copying
     them into ``/usr/local/lib`` can shadow the task image's own libraries and
     break unrelated commands, including Harbor's verifier bootstrap.
+    A supplied virtual environment uses the bundled runtime in place, preserving
+    the task image's interpreter and standard library.
     """
     bundled_runtime = str(PurePosixPath(source_dir) / ".python-runtime")
+    if venv_dir is None:
+        interpreter_setup = '''mkdir -p /usr/local/bin /usr/local/lib
+cp -a "$PYTHON_RUNTIME/bin/python3.11" /usr/local/bin/python3.11
+cp -a "$PYTHON_RUNTIME/lib/python3.11" /usr/local/lib/'''
+    else:
+        interpreter_setup = f'''VENV={shlex.quote(venv_dir)}
+sed -i "s|^home = .*|home = $PYTHON_RUNTIME/bin|" "$VENV/pyvenv.cfg"
+for name in python python3 python3.11; do
+    ln -sf "$PYTHON_RUNTIME/bin/python3.11" "$VENV/bin/$name"
+done'''
     return f"""\
 PYTHON_RUNTIME={shlex.quote(bundled_runtime)}
 PYTHON_DEPENDENCY_DIR={shlex.quote(dependency_dir)}
 test -x "$PYTHON_RUNTIME/bin/python3.11"
-mkdir -p /usr/local/bin /usr/local/lib
-cp -a "$PYTHON_RUNTIME/bin/python3.11" /usr/local/bin/python3.11
-cp -a "$PYTHON_RUNTIME/lib/python3.11" /usr/local/lib/
+{interpreter_setup}
 rm -rf "$PYTHON_DEPENDENCY_DIR"
 mkdir -p "$PYTHON_DEPENDENCY_DIR"
 for library in "$PYTHON_RUNTIME"/lib/*; do
@@ -606,27 +616,28 @@ async def stage_cached_file(runtime: Runtime, source: Path, destination: str) ->
     await runtime.write(destination, await asyncio.to_thread(source.read_bytes))
 
 
-async def stage_cached_tree(runtime: Runtime, source: Path, destination: str) -> None:
-    """Copy a cached installation tree into a runtime."""
+async def stage_cached_tree(runtime: Runtime, source: Path, destination: str, *, writable: bool = False) -> None:
+    """Stage a cached tree, copying instead of linking when it must be writable."""
     if isinstance(runtime, DockerRuntime) and getattr(
         runtime, "_harness_cache_mounted", False
     ):
         relative = source.resolve().relative_to(cache_root())
         mounted_source = str(CONTAINER_CACHE_ROOT / relative.as_posix())
         parent = str(PurePosixPath(destination).parent)
+        stage = (f"cp -a {shlex.quote(mounted_source)} {shlex.quote(destination)}" if writable
+                 else f"ln -s {shlex.quote(mounted_source)} {shlex.quote(destination)}")
         link = await runtime.run(
             [
                 "sh",
                 "-c",
                 f"mkdir -p {shlex.quote(parent)} && "
-                f"rm -rf {shlex.quote(destination)} && "
-                f"ln -s {shlex.quote(mounted_source)} {shlex.quote(destination)}",
+                f"rm -rf {shlex.quote(destination)} && " + stage,
             ],
             {},
         )
         if link.exit_code != 0:
             detail = (link.stderr or link.stdout).strip()
-            raise RuntimeError(f"failed to link cached tree: {detail}")
+            raise RuntimeError(f"failed to stage cached tree: {detail}")
         return
     result = await runtime.run(["mkdir", "-p", destination], {})
     if result.exit_code != 0:

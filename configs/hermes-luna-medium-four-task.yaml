@@ -1,0 +1,24 @@
+ops:
+  plan_rollouts:
+    config:
+      batch_id: hermes-luna-medium-four-task
+      models: [openai/gpt-6-luna]
+      reasoning_effort: medium
+      harnesses:
+        - {id: hermes_agent, version: 0.20.0}
+      task_ids:
+        - pypi-server
+        - fix-code-vulnerability
+        - qemu-startup
+        - sanitize-git-repo
+      num_rollouts: 1
+      container_cpus: 4
+      container_memory_gb: 5
+      max_tokens: 8192
+      rollout_timeout_seconds: 660
+      rollout_retries: 0
+      output_dir: outputs/singleagent/hermes-luna-medium-four-task
+
+execution:
+  config:
+    max_concurrent: 4

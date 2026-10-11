@@ -14,16 +14,46 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from verifiers.v1.tasksets.harbor.taskset import HarborData, HarborTask
+from verifiers.v1.runtimes import DockerConfig
 
 from harness_bloat_bench.multiagent.accounting import Ledger
 from harness_bloat_bench.multiagent.config import load_config
 from harness_bloat_bench.multiagent.gateway import chat_sse
-from harness_bloat_bench.multiagent.harnesses import configure_artifact_cache, prepare_artifact
+from harness_bloat_bench.multiagent.harnesses import BenchRuntime, configure_artifact_cache, prepare_artifact, setup_harness
+from harness_bloat_bench.harnesses.hermes_agent import HERMES_PYTHON_DEPENDENCY_DIR, HermesAgentHarness, HermesAgentHarnessConfig
 from harness_bloat_bench.multiagent.shared import SharedTeam
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("MULTIAGENT_NATIVE_SMOKE") != "1", reason="Set MULTIAGENT_NATIVE_SMOKE=1 for real Docker/CLI checks with a local scripted model")
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.skipif(not os.environ.get("MULTIAGENT_SHARED_TEST_IMAGE"), reason="Set MULTIAGENT_SHARED_TEST_IMAGE to check task Python isolation")
+@pytest.mark.parametrize("setup_mode", ["multiagent", "singleagent"])
+def test_hermes_setup_preserves_task_python_and_ssl(tmp_path, monkeypatch, setup_mode):
+    async def scenario():
+        config = load_config(ROOT / "configs/multiagent/hermes-sol-deepseek-four-task.json")
+        configure_artifact_cache()
+        artifact = await asyncio.to_thread(prepare_artifact, config)
+        runtime = BenchRuntime(DockerConfig(image=os.environ["MULTIAGENT_SHARED_TEST_IMAGE"], workdir="/app", cpu=4, memory=5),
+                               "mab-python-" + str(os.getpid()), "linux/amd64", tmp_path)
+        probe = ["python", "-c", "import ssl,sys; print(sys.version, sys.prefix, ssl.OPENSSL_VERSION)"]
+        try:
+            await runtime.start()
+            before = await runtime.run(probe, {})
+            assert before.exit_code == 0, before.stderr
+            if setup_mode == "multiagent":
+                await setup_harness(config, runtime, artifact)
+            else:
+                monkeypatch.setattr("harness_bloat_bench.harnesses.hermes_agent.ensure_docker_built_tree", lambda **kwargs: artifact)
+                await HermesAgentHarness(HermesAgentHarnessConfig(id="hermes_agent", version=config.harness.version)).setup(runtime)
+            for env in ({}, {"LD_LIBRARY_PATH": HERMES_PYTHON_DEPENDENCY_DIR}):
+                after = await runtime.run(probe, env)
+                assert after.exit_code == 0, after.stderr
+                assert after.stdout == before.stdout
+        finally:
+            await runtime.stop()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("harness", ["hermes", "opencode"])

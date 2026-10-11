@@ -11,11 +11,12 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 from verifiers.v1.runtimes import DockerConfig, DockerRuntime, ProgramResult
 from verifiers.v1.runtimes.docker import docker
 
-from harness_bench.harness_cache import (
+from harness_bloat_bench.harness_cache import (
     CONTAINER_CACHE_ROOT,
     cache_root,
     ensure_docker_built_tree,
@@ -24,8 +25,8 @@ from harness_bench.harness_cache import (
     stage_cached_file,
     stage_cached_tree,
 )
-from harness_bench.harnesses.hermes_agent import HERMES_BIN, HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, _install_script
-from harness_bench.harnesses.opencode import OPENCODE_BIN
+from harness_bloat_bench.harnesses.hermes_agent import HERMES_BIN, HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, _install_script
+from harness_bloat_bench.harnesses.opencode import OPENCODE_BIN
 
 from .accounting import scrub
 from .config import TeamConfig
@@ -80,7 +81,7 @@ class BenchRuntime(DockerRuntime):
     async def start(self):
         self._container = self.name
         result = await docker(
-            "run", "--detach", "--platform", self.platform,
+            "run", "--detach", "--init", "--platform", self.platform,
             "--network", "bridge",
             *([] if sys.platform == "darwin" else ["--add-host", "host.docker.internal:host-gateway"]),
             "--cpus", str(self.config.cpu), "--memory", f"{self.config.memory}g",
@@ -98,7 +99,7 @@ class BenchRuntime(DockerRuntime):
     async def run_program(self, argv, env):
         return await self._stream_program(argv, env, self.output, self.program_timeout)
 
-    async def _stream_program(self, argv, env, directory, timeout):
+    async def _stream_program(self, argv, env, directory, timeout, *, cleanup=None):
         directory.mkdir(parents=True, exist_ok=True)
         env_args = [arg for key, value in env.items() for arg in ("--env", f"{key}={value}")]
         timeout_args = [] if timeout is None else ["timeout", "--signal=TERM", "--kill-after=2s", f"{max(0.1, timeout):.3f}s"]
@@ -116,9 +117,13 @@ class BenchRuntime(DockerRuntime):
         pumps = [asyncio.create_task(pump(process.stdout, out)), asyncio.create_task(pump(process.stderr, err))]
         try:
             code = await process.wait()
+            if cleanup:
+                await cleanup()
             await asyncio.gather(*pumps)
             return ProgramResult(code, scrub(out.read_text(errors="replace")), scrub(err.read_text(errors="replace")))
         finally:
+            if cleanup:
+                await cleanup()
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     process.terminate()
@@ -132,6 +137,21 @@ class BenchRuntime(DockerRuntime):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)
+
+    async def stop_process_group(self, marker):
+        async with asyncio.timeout(3):
+            await docker("exec", self.name, "bash", "-c", '''
+if [ -f "$1" ]; then
+    read -r pid < "$1"
+    case "$pid" in ''|*[!0-9]*) exit 1;; esac
+    if [ "$pid" -gt 1 ]; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        sleep 0.1
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    rm -f -- "$1"
+fi
+''', "bench-stop-service", marker)
 
     async def run(self, argv, env):
         if argv == ["sh", "-c", "cd /tests && bash test.sh"]:
@@ -151,19 +171,76 @@ class BenchRuntime(DockerRuntime):
         return {"container_id": self.info.id, "oom_killed": state.get("OOMKilled"), "container_memory_limit_gb": self.config.memory, "container_cpu_limit": self.config.cpu}
 
 
+class ContainerSession(BenchRuntime):
+    """Independent agent state and processes without ownership of the container."""
+
+    def __init__(self, owner: BenchRuntime, output: Path, workdir="/app"):
+        super().__init__(owner.config.model_copy(update={"workdir": workdir}), owner.name, owner.platform, output)
+        self.owner = owner
+        self._container = owner.name
+        self.info = owner.info
+        self._process_tokens: set[str] = set()
+
+    async def start(self):
+        raise RuntimeError("Only the owner can start the shared container")
+
+    def cleanup(self):
+        # Runtime finalizers must never remove another agent's shared container.
+        pass
+
+    async def stop(self):
+        for token in list(self._process_tokens):
+            await self._stop_program(token)
+
+    async def _stop_program(self, token):
+        if token not in self._process_tokens:
+            return
+        # Native terminal tools may create their own process groups. An inherited
+        # environment marker also finds those descendants, without touching the
+        # other agents or services launched through independent docker execs.
+        async with asyncio.timeout(3):
+            result = await docker("exec", self.name, "bash", "-c", '''
+pids=()
+for file in /proc/[0-9]*/environ; do
+    if grep -zFqx -- "BENCH_PROCESS_TOKEN=$1" "$file" 2>/dev/null; then
+        pid=${file#/proc/}; pid=${pid%/environ}
+        if [ "$pid" -gt 1 ]; then pids+=("$pid"); fi
+    fi
+done
+if [ "${#pids[@]}" -gt 0 ]; then
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    sleep 0.1
+    kill -KILL "${pids[@]}" 2>/dev/null || true
+fi
+''', "bench-stop-agent", token)
+        if result.exit_code:
+            raise RuntimeError("Cannot stop shared session processes: " + result.stderr[-1000:])
+        self._process_tokens.discard(token)
+
+    async def _stream_program(self, argv, env, directory, timeout):
+        token = uuid4().hex
+        self._process_tokens.add(token)
+        try:
+            return await super()._stream_program(argv, {**env, "BENCH_PROCESS_TOKEN": token}, directory, timeout,
+                                                 cleanup=lambda: self._stop_program(token))
+        finally:
+            await self._stop_program(token)
+
+
 async def setup_harness(config: TeamConfig, runtime: BenchRuntime, artifact: Path):
     if config.harness.id == "opencode":
         await stage_cached_file(runtime, artifact, OPENCODE_BIN)
         check = await runtime.run([OPENCODE_BIN, "--version"], {})
     else:
-        await stage_cached_tree(runtime, artifact, HERMES_DIR)
-        check = await runtime.run(["sh", "-c", install_cached_python_runtime_script(HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR) + f"\nLD_LIBRARY_PATH={shlex.quote(HERMES_PYTHON_DEPENDENCY_DIR)} {shlex.quote(HERMES_BIN)} --version"], {})
+        await stage_cached_tree(runtime, artifact, HERMES_DIR, writable=True)
+        install = install_cached_python_runtime_script(HERMES_DIR, HERMES_PYTHON_DEPENDENCY_DIR, venv_dir=HERMES_DIR + "/source/venv")
+        check = await runtime.run(["sh", "-c", install + f"\nLD_LIBRARY_PATH={shlex.quote(HERMES_PYTHON_DEPENDENCY_DIR)} {shlex.quote(HERMES_BIN)} --version"], {})
     if check.exit_code:
         raise RuntimeError(f"Harness setup exited {check.exit_code}: " + ((check.stderr or check.stdout)[-2000:] or "no output (check container memory and binary platform)"))
 
 
 async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: AgentRoute, endpoint: str, prompt: str, mcp_url: str | None = None):
-    state = "/tmp/bench-agent-state"
+    state = "/tmp/bench-agent-state/" + route.agent_id
     endpoint = runtime.host_url(endpoint)
     credential = "BENCH_AGENT_KEY"
     env = {credential: route.token}
@@ -171,11 +248,9 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
         provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": endpoint, "apiKey": "{env:" + credential + "}"}, "models": {"agent": {"name": route.model.model, "limit": {"context": 1048576, "output": route.model.max_output_tokens}}}}
         cli_config = {"provider": {"bench": provider}, "permission": {"*": "allow", "task": "deny"}, "tools": {"task": False}, "share": "disabled"}
         if mcp_url:
-            cli_config.update(
-                permission={"*": "deny", "bench_*": "allow"},
-                tools={"*": False, "bench_*": True},
-                mcp={"bench": {"type": "remote", "url": runtime.host_url(mcp_url), "timeout": 70000}},
-            )
+            cli_config["mcp"] = {"bench": {"type": "remote", "url": runtime.host_url(mcp_url), "timeout": 70000}}
+            if config.execution_mode == "isolated_tasks":
+                cli_config.update(permission={"*": "deny", "bench_*": "allow"}, tools={"*": False, "bench_*": True})
         await runtime.write(state + "/opencode.json", json.dumps(cli_config).encode())
         env.update(OPENCODE_CONFIG=state + "/opencode.json", XDG_CONFIG_HOME=state + "/config", XDG_DATA_HOME=state + "/data", XDG_STATE_HOME=state + "/state")
         argv = [OPENCODE_BIN, "run", "--auto", "--format", "json", "--model", "bench/agent", prompt]
@@ -183,11 +258,14 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
         cli_config = {
             "model": {"default": route.model.model, "provider": "custom", "base_url": endpoint, "api_key": "${" + credential + "}"},
             "agent": {"max_turns": route.model.max_calls, "system_prompt": "You are a benchmark agent. Follow the user's task precisely. Do not inspect or modify hidden benchmark tests."},
-            "terminal": {"backend": "local", "cwd": "/app"},
+            "terminal": {"backend": "local", "cwd": runtime.config.workdir},
         }
         if mcp_url:
             cli_config["mcp_servers"] = {"bench": {"url": runtime.host_url(mcp_url)}}
         await runtime.write(state + "/config.yaml", json.dumps(cli_config).encode())
         env.update(HERMES_HOME=state, HERMES_SKIP_NODE_BOOTSTRAP="1", LD_LIBRARY_PATH=HERMES_PYTHON_DEPENDENCY_DIR, HERMES_INTERACTIVE="0")
-        argv = [HERMES_BIN, "chat", "--model", route.model.model, "--yolo", "--toolsets", "mcp-bench" if mcp_url else "terminal", "--query", prompt]
+        toolsets = "terminal,file,mcp-bench" if mcp_url else "terminal,file"
+        if mcp_url and config.execution_mode == "isolated_tasks":
+            toolsets = "mcp-bench"
+        argv = [HERMES_BIN, "chat", "--model", route.model.model, "--yolo", "--toolsets", toolsets, "--query", prompt]
     return await runtime.run_program(argv, env)

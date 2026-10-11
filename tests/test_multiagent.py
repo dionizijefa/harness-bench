@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from harness_bloat_bench.multiagent.accounting import Ledger, normalized_usage
 from harness_bloat_bench.multiagent.config import ModelSpec, load_config
 from harness_bloat_bench.multiagent.gateway import AgentRoute, Gateway, chat_to_responses, responses_to_chat
-from harness_bloat_bench.multiagent.runner import Team
+from harness_bloat_bench.multiagent.legacy_team import Team
 from verifiers.v1.runtimes import ProgramResult
 
 
@@ -60,6 +60,23 @@ def test_gpt_tool_calls_use_responses_with_prior_reasoning():
     converted = responses_to_chat({"id": "g", "model": model.model, "output": previous, "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8, "cost": 0.00001}})
     assert converted["choices"][0]["finish_reason"] == "tool_calls"
     assert converted["usage"]["cost"] == 0.00001
+
+
+@pytest.mark.parametrize("detail", [None, "low", "high"])
+def test_chat_vision_content_is_converted_for_responses(detail):
+    model = ModelSpec(model="openai/gpt-6.1-sol", reasoning_effort="high", api="responses")
+    image = {"url": "data:image/png;base64,screenshot"}
+    if detail is not None:
+        image["detail"] = detail
+    content = [{"type": "text", "text": "Describe this form"}, {"type": "image_url", "image_url": image}]
+    body = {"messages": [{"role": "user", "content": content},
+                         {"role": "tool", "tool_call_id": "screenshot", "content": content}]}
+    request = chat_to_responses(body, model)
+    expected = [{"type": "input_text", "text": "Describe this form"},
+                {"type": "input_image", "image_url": image["url"], "detail": detail or "auto"}]
+    assert request["input"][0]["content"] == expected
+    assert request["input"][1]["output"] == expected
+    assert body["messages"][0]["content"][1] == {"type": "image_url", "image_url": image}
 
 
 def test_comparison_configs_are_fresh_and_matching():
@@ -127,8 +144,8 @@ def test_hidden_grader_controls_outcome_even_after_agent_timeout(tmp_path, monke
         team.runtime = lambda *args: runtime
         async def setup(*args): pass
         async def launch(*args): return ProgramResult(exit_code, "I succeeded!", "")
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.setup_harness", setup)
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.launch_harness", launch)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.setup_harness", setup)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.launch_harness", launch)
         await team.worker(config.task_ids[0], "")
         row = team.rows[config.task_ids[0]]
         assert row["passed"] is (reward >= 1)
@@ -215,8 +232,8 @@ def test_verified_outcome_survives_cancellation_during_log_collection(tmp_path, 
             collecting.set()
             await asyncio.Event().wait()
         team.capture_verifier = capture
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.setup_harness", setup)
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.launch_harness", launch)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.setup_harness", setup)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.launch_harness", launch)
         worker = asyncio.create_task(team.worker(config.task_ids[0], ""))
         await collecting.wait()
         worker.cancel()
@@ -265,6 +282,36 @@ def test_concurrent_calls_reserve_cost_before_provider_request(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("native_pool", [False, True])
+def test_native_executor_pool_does_not_share_one_helpers_call_limit(tmp_path, native_pool):
+    async def scenario():
+        ledger = Ledger(tmp_path)
+        gateway = Gateway("unused-test-key", ledger, {"test": {"pricing": {"prompt": "0", "completion": "0"}}})
+        await gateway.http.aclose()
+        async def provider(request):
+            return httpx.Response(200, json={"id": "g", "model": "test", "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0}})
+        gateway.http = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+        spec = ModelSpec(model="test", reasoning_effort="medium", max_calls=1)
+        route = AgentRoute("team", "executor", "executor", None, spec, time.monotonic() + 30, None,
+                           aggregate_native_workers=native_pool)
+        gateway.register(route)
+        app = FastAPI()
+        @app.post("/")
+        async def relay(request: Request):
+            return await gateway.relay("executor", "chat/completions", request)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://local.test",
+                                    headers={"Authorization": "Bearer " + route.token}) as client:
+            body = {"messages": [{"role": "user", "content": "test"}]}
+            assert (await client.post("/", json=body)).status_code == 200
+            assert (await client.post("/", json=body)).status_code == (200 if native_pool else 429)
+        assert ledger.summarize()["model_call_count"] == (2 if native_pool else 1)
+        await gateway.close()
+        ledger.db.close()
+    asyncio.run(scenario())
+
+
 def test_missing_reward_is_an_infrastructure_error(tmp_path, monkeypatch):
     async def scenario():
         config = load_config(CONFIG)
@@ -281,8 +328,8 @@ def test_missing_reward_is_an_infrastructure_error(tmp_path, monkeypatch):
         team.runtime = lambda *args: Runtime()
         async def setup(*args): pass
         async def launch(*args): return ProgramResult(0, "done", "")
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.setup_harness", setup)
-        monkeypatch.setattr("harness_bloat_bench.multiagent.runner.launch_harness", launch)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.setup_harness", setup)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.legacy_team.launch_harness", launch)
         await team.worker(config.task_ids[0], "")
         row = team.rows[config.task_ids[0]]
         assert row["state"] == "error"
@@ -446,7 +493,7 @@ def test_global_deadline_finalizes_one_consistent_team_record(tmp_path, monkeypa
         monkeypatch.setattr(runner, "configure_artifact_cache", lambda: None)
         monkeypatch.setattr(runner, "prepare_artifact", lambda config: tmp_path)
         monkeypatch.setattr(runner, "HarborTaskset", lambda config: SimpleNamespace(load=lambda: tasks))
-        monkeypatch.setattr(runner.Team, "run", interrupted_team)
+        monkeypatch.setattr(Team, "run", interrupted_team)
         output = tmp_path / "run"
         await runner.run_configs([config], output, "unused-test-key", 0.1)
         comparison = json.loads((output / "comparison.json").read_text())

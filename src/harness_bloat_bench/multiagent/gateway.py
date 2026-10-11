@@ -16,12 +16,28 @@ from .accounting import Ledger, normalized_usage, scrub
 from .config import ModelSpec
 
 
+def responses_content(content):
+    if not isinstance(content, list):
+        return content
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append({**part, "type": "input_text"})
+        elif part.get("type") == "image_url":
+            image = part["image_url"]
+            parts.append({"type": "input_image", "image_url": image["url"],
+                          "detail": image.get("detail", "auto")})
+        else:
+            parts.append(part)
+    return parts
+
+
 def chat_to_responses(body: dict, model: ModelSpec, prior_outputs: dict[str, list] | None = None) -> dict:
     items = []
     for message in body.get("messages", []):
         role = message["role"]
         if role == "tool":
-            items.append({"type": "function_call_output", "call_id": message["tool_call_id"], "output": message.get("content") or ""})
+            items.append({"type": "function_call_output", "call_id": message["tool_call_id"], "output": responses_content(message.get("content") or "")})
         elif role == "assistant":
             calls = message.get("tool_calls") or []
             previous = (prior_outputs or {}).get(calls[0]["id"]) if calls else None
@@ -29,10 +45,10 @@ def chat_to_responses(body: dict, model: ModelSpec, prior_outputs: dict[str, lis
                 items.extend(previous)
                 continue
             if message.get("content"):
-                items.append({"role": role, "content": message["content"]})
+                items.append({"role": role, "content": responses_content(message["content"])})
             items.extend({"type": "function_call", "call_id": call["id"], **call["function"]} for call in calls)
         else:
-            items.append({"role": role, "content": message.get("content") or ""})
+            items.append({"role": role, "content": responses_content(message.get("content") or "")})
     result = {
         "model": model.model,
         "input": items,
@@ -94,6 +110,8 @@ class AgentRoute:
     max_cost_usd: float | None
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     prior_outputs: dict[str, list] = field(default_factory=dict)
+    native_executor: AgentRoute | None = None
+    aggregate_native_workers: bool = False
 
 
 class Gateway:
@@ -115,7 +133,9 @@ class Gateway:
             raise HTTPException(408, "Agent deadline reached")
         body = await request.json()
         calls = [r for r in self.ledger.records.values() if r["agent_id"] == agent_id]
-        if len(calls) >= route.model.max_calls:
+        # Native children share credentials; their iteration limits belong to
+        # the harness, rather than imposing one helper's limit on the whole pool.
+        if not route.aggregate_native_workers and len(calls) >= route.model.max_calls:
             raise HTTPException(429, "Agent call limit reached")
         pricing = self.catalog[route.model.model]["pricing"]
         tiers = [pricing, *pricing.get("overrides", [])]

@@ -95,36 +95,31 @@ async def prepare_vba_images(config, task, output: Path) -> dict:
     return metadata
 
 
-async def grade_vba(team) -> None:
+async def grade_vba(run) -> None:
     """After agents stop, copy only app artifacts into the clean verifier image."""
-    row = team.rows[TASK_ID]
-    directory = team.output / team.config.name / "tasks" / TASK_ID / "verifier"
+    row = run.task_result
+    directory = run.output / run.config.name / "tasks" / TASK_ID / "verifier"
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     # Grading starts on submission and exits as soon as all checks finish.
     # Early submission must not turn unused agent time into a longer grader cap.
-    grading_deadline = min(team.deadline, started + team.config.grading_reserve_seconds)
+    grading_deadline = min(run.deadline, started + run.config.grading_reserve_seconds)
     row.update(state="scoring", grading_started_at=utc_now())
-    sandbox = team.config.sandbox
-    grader = BenchRuntime(DockerConfig(image=team.verifier_image, workdir="/workspace", cpu=sandbox.shared_cpus, memory=sandbox.shared_memory_gb),
+    sandbox = run.config.sandbox
+    grader = BenchRuntime(DockerConfig(image=run.verifier_image, workdir="/workspace", cpu=sandbox.shared_cpus, memory=sandbox.shared_memory_gb),
                           "mab-vba-grade-" + uuid4().hex[:12], sandbox.platform, directory)
-    team.runtimes.append(grader)
+    run.runtimes.append(grader)
     session = ContainerSession(grader, directory, "/workspace")
     ready = False
     try:
         async with asyncio.timeout_at(grading_deadline):
-            # Freeze services as well as agent commands before taking artifacts.
-            for service in team.services.values():
-                if service["state"] == "started":
-                    await team.container.stop_process_group(service["pid_path"])
-                    service["state"] = "stopped"
             archive = directory.parent / "submission.tgz"
-            await team.container.run(["mkdir", "-p", APP_ROOT], {})
-            packed = await team.container.run(["tar", "-czf", "/tmp/bench-submission.tgz",
+            await run.container.run(["mkdir", "-p", APP_ROOT], {})
+            packed = await run.container.run(["tar", "-czf", "/tmp/bench-submission.tgz",
                                                *("--exclude=" + item for item in EXCLUDES), "-C", "/workspace", "generated_app"], {})
             if packed.exit_code:
                 raise RuntimeError("Cannot snapshot submitted app: " + packed.stderr[-1000:])
-            copied = await docker("cp", team.container.name + ":/tmp/bench-submission.tgz", str(archive))
+            copied = await docker("cp", run.container.name + ":/tmp/bench-submission.tgz", str(archive))
             if copied.exit_code:
                 raise RuntimeError("Cannot copy submitted app: " + copied.stderr[-1000:])
             row["submission_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -183,8 +178,8 @@ async def grade_vba(team) -> None:
         (directory / "subtasks.json").write_text(json.dumps(row["subtasks"], indent=2) + "\n")
         (directory / "reward.json").write_text(json.dumps({"reward": row["reward"], "score_complete": row["score_complete"]}) + "\n")
         for subtask in row["subtasks"]:
-            team.event("subtask_graded", task_id=TASK_ID, **subtask)
+            run.event("subtask_graded", task_id=TASK_ID, **subtask)
         row.update(grading_seconds=time.monotonic() - started, ended_at=utc_now())
-        team.event("task_graded", **row)
-        team.write_result()
+        run.event("task_graded", **row)
+        run.write_result()
         await grader.stop()

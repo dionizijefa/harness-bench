@@ -55,12 +55,20 @@ checks remain **unscored** and earn no credit; the denominator never shrinks.
 The report shows both earned credit and full subtask completion.
 This is a custom partial-credit protocol, not an official Terminal-Bench score.
 
-The orchestrator receives the full task and public subtask criteria and chooses
-how to split the work. `spawn_subagent(instructions, task_id?, subtask_id?)`
-can associate a helper with a rubric component; helpers still share the whole
-workspace, can work on multiple components, and can be called again for revisions.
-No hidden grading runs while agents are working. Helpers report through
-`wait_for_subagents`, and only the orchestrator's final exit submits the app.
+The orchestrator receives the original Terminal-Bench task prompt plus time,
+shared-resource, subagent and final-submission instructions, and chooses how to
+split the work using the original harness's native subagents. Hermes uses its
+default CLI toolsets and native `delegate_task`; OpenCode uses its built-in
+`task` tool and `general`/`explore` agents. Their native prompts and behavior
+remain in place, with the configured executor model selected for subagents.
+All agents share the workspace. No benchmark MCP server or tools are exposed.
+The native path in `src/harness_bloat_bench/multiagent/vba_run.py` launches one
+CLI, enforces its deadline, records usage and grades the submitted application.
+The old `Team` and shared-helper orchestration are isolated in `legacy_team.py`
+and `legacy_shared.py` for the 2.1 configs.
+The rubric is used only for grading and reporting; it is not exposed to agents.
+No hidden grading runs while agents are working. Only the orchestrator's final
+exit submits the app.
 
 The runner resolves the pinned dataset and downloads only `vba-userform-port`.
 It prepares the agent image and **separate verifier image** before timing starts,
@@ -84,20 +92,23 @@ startup prerequisites can still cause multiple checks to fail. Live services are
 for development; the verifier always starts the submitted app itself.
 
 The new configs allow **15 minutes for agent work and sandbox setup**, followed
-by **up to 60 minutes for grading**, with four CPUs and 8 GiB shared by each team.
+by **up to 60 minutes for grading**, with eight CPUs and 16 GiB shared by each team.
 Grading starts immediately on submission and finishes as soon as the checks do;
 60 minutes is a timeout for hangs, not a required duration. Early submission
 does not extend grading beyond its 60-minute cap. The total team/comparison cap
 is 4,500 seconds (75 minutes).
-Image builds and harness downloads happen before the clock. There is no worker
-concurrency or dollar cap; per-agent call/output limits remain in the configs.
+Image builds and harness downloads happen before the clock. There is no benchmark
+worker concurrency or dollar cap; native delegation defaults apply. Orchestrator
+call limits, native subagent iteration limits and model output limits come from
+the configs.
 `--overall-timeout-seconds` overrides the comparison deadline; by default it
 comes from the configs. Longer runs are supported up to 29,700 seconds. The 2.1
 legacy configs keep their existing limits.
 
 `outputs/multiagent/<run>/report.html`, `comparison.json`, and each team's
 `result.json` include partial rewards, per-subtask/per-check outcomes, completeness,
-agent usage, worker overlap and coordinator overhead. Task artifacts live in
+orchestrator usage, aggregate native executor usage and coordinator overhead.
+Native helper counts and worker overlap are unmeasured. Task artifacts live in
 `<team>/tasks/vba-userform-port/`: the frozen submission archive, its hash,
 verifier logs, `trace_results.json`, `subtasks.json` and `reward.json`.
 The manifest records the rubric, task source hashes, image IDs, model settings

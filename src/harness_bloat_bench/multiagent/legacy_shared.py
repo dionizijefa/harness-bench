@@ -1,4 +1,4 @@
-"""One orchestrator and its helpers work on all tasks in one live container."""
+"""Legacy Terminal-Bench 2.1 shared-container orchestration via benchmark MCP."""
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +16,8 @@ from verifiers.v1.errors import SandboxError
 from .accounting import scrub, utc_now
 from .gateway import AgentRoute
 from .harnesses import BenchRuntime, ContainerSession, launch_harness, setup_harness
-from .runner import Team
+from .legacy_team import Team
 from .shared_environment import TASK_WORKDIRS
-from .vba_rubric import TASK_ID, rubric, score_results
 
 
 class VerifierSession(ContainerSession):
@@ -34,14 +33,12 @@ class VerifierSession(ContainerSession):
         return result
 
 
-class SharedTeam(Team):
-    def __init__(self, *args, shared_image: str, verifier_image: str | None = None, **kwargs):
+class LegacySharedTeam(Team):
+    def __init__(self, *args, shared_image: str, **kwargs):
         super().__init__(*args, **kwargs)
         self.shared_image = shared_image
-        self.verifier_image = verifier_image
-        self.is_vba = self.config.scoring == "vba_subtasks_v1"
-        self.workdir = "/workspace" if self.is_vba else "/app"
-        self.task_workdirs = {TASK_ID: self.workdir} if self.is_vba else TASK_WORKDIRS
+        self.workdir = "/app"
+        self.task_workdirs = TASK_WORKDIRS
         self.container = None
         self.sessions = []
         self.workers = {}
@@ -51,10 +48,8 @@ class SharedTeam(Team):
         self.phase = "planned"
         for row in self.rows.values():
             row.update(state="pending", verifier_state="unscored")
-            if self.is_vba:
-                row.update(score_results([]))
         self.mcp = FastMCP("Harness Bench", stateless_http=True, json_response=True, transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
-        for tool in (self.spawn_subagent, self.wait_for_subagents, self.stop_subagent, self.start_service, self.stop_service, self.team_status):
+        for tool in (self.spawn_subagent, self.wait_for_subagents, self.stop_subagent, self.team_status, self.start_service, self.stop_service):
             self.mcp.tool()(tool)
 
     @property
@@ -73,25 +68,20 @@ class SharedTeam(Team):
         self.sessions.append(session)
         return session
 
-    async def spawn_subagent(self, instructions: str, task_id: str | None = None, subtask_id: str | None = None) -> dict:
-        """Start a helper in this SAME container. Give concrete instructions, optionally associated with a task_id and rubric subtask_id. Files, services and changes are shared immediately. You may launch multiple helpers for a component or follow-up work. Returns an agent_id; collect its output with wait_for_subagents. Finishing a helper does NOT submit or grade the work."""
+    async def spawn_subagent(self, instructions: str, task_id: str | None = None) -> dict:
+        """Start a helper with your instructions in the same shared container. Returns an agent_id; collect its output with wait_for_subagents."""
         if not self.accepting_workers or time.monotonic() >= self.execution_deadline:
             return {"error": "Agent execution is closed"}
-        if self.is_vba and task_id is None:
-            task_id = TASK_ID
-        subtask_ids = [row["subtask_id"] for row in rubric()["subtasks"]] if self.is_vba else []
-        if subtask_id is not None and subtask_id not in subtask_ids:
-            return {"error": "Unknown subtask_id", "subtask_ids": subtask_ids}
         if task_id is not None and task_id not in self.tasks:
             return {"error": "Unknown task_id", "task_ids": self.config.task_ids}
         if not instructions.strip():
             return {"error": "Provide instructions for the helper"}
         self.spawns += 1
         agent_id = f"{self.config.name}-helper-{self.spawns}"
-        self.workers[agent_id] = {"agent_id": agent_id, "task_id": task_id, "subtask_id": subtask_id, "role": "executor", "model": self.config.executor.model, "state": "queued", "instructions": instructions}
-        self.event("worker_spawn", agent_id=agent_id, task_id=task_id, subtask_id=subtask_id, instructions=instructions)
+        self.workers[agent_id] = {"agent_id": agent_id, "task_id": task_id, "role": "executor", "model": self.config.executor.model, "state": "queued", "instructions": instructions}
+        self.event("worker_spawn", agent_id=agent_id, task_id=task_id, instructions=instructions)
         self.active[agent_id] = asyncio.create_task(self.worker(agent_id, instructions))
-        return {"agent_id": agent_id, "task_id": task_id, "subtask_id": subtask_id, "state": "queued", "shared_container": True}
+        return {"agent_id": agent_id, "task_id": task_id, "state": "queued", "shared_container": True}
 
     async def wait_for_subagents(self, agent_ids: list[str] | None = None, wait_seconds: float = 60) -> dict:
         """Wait up to 60 seconds for any selected helper to finish and return its output/status. You may inspect or edit the shared workspace, then spawn follow-up helpers. Helpers do not run the hidden benchmark grader."""
@@ -104,7 +94,7 @@ class SharedTeam(Team):
         return {"workers": [self.worker_status(agent_id) for agent_id in ids], "remaining_execution_seconds": max(0, self.execution_deadline - time.monotonic())}
 
     async def stop_subagent(self, agent_id: str) -> dict:
-        """Stop a helper's agent process and foreground commands. Its shared file changes remain. Services started through start_service remain running. You can inspect the work or spawn a replacement."""
+        """Stop a helper's agent process and foreground commands. Its shared file changes remain. You can inspect the work or spawn a replacement."""
         task = self.active.get(agent_id)
         if task is None:
             return {"error": "Unknown agent_id"}
@@ -116,7 +106,7 @@ class SharedTeam(Team):
         return {**self.workers[agent_id], "usage": self.ledger.summarize(agent_id=agent_id)}
 
     async def start_service(self, command: str, workdir: str | None = None) -> dict:
-        """Start a persistent task service outside agent process lifetimes. Supply its FOREGROUND shell command (no daemonize/setsid/&) and absolute workdir. VBA grading launches the packaged app separately; legacy grading uses live services. Returns a service_id and log_path; use terminal checks to verify readiness."""
+        """Start a persistent task service outside agent process lifetimes. Supply its FOREGROUND shell command (no daemonize/setsid/&) and absolute workdir. Legacy grading uses live services. Returns a service_id and log_path; use terminal checks to verify readiness."""
         async with self.service_lock, asyncio.timeout(5):
             return await self._start_service(command, workdir or self.workdir)
 
@@ -160,7 +150,8 @@ class SharedTeam(Team):
 
     def team_status(self) -> dict:
         """Return helper outputs, batch phase and usage. Hidden grading happens only after the orchestrator finishes the entire batch."""
-        return {"phase": self.phase, "tasks": list(self.rows.values()), "workers": [self.worker_status(agent_id) for agent_id in self.workers], "services": list(self.services.values()),
+        tasks = list(self.rows.values())
+        return {"phase": self.phase, "tasks": tasks, "workers": [self.worker_status(agent_id) for agent_id in self.workers], "services": list(self.services.values()),
                 "remaining_execution_seconds": max(0, self.execution_deadline - time.monotonic()), "usage": self.ledger.summarize(team=self.config.name)}
 
     async def worker(self, agent_id, instructions):
@@ -177,19 +168,7 @@ class SharedTeam(Team):
                 interval = [time.monotonic(), None]
                 self.worker_intervals.append(interval)
                 runtime.program_timeout = max(.1, deadline - time.monotonic())
-                prompt = ("You are a helper in the orchestrator's shared Docker container. All agents share files and processes. "
-                          "Complete the assigned subtask and report your changes and checks. Coordinate file ownership through the orchestrator. "
-                          + self.environment_prompt() +
-                          "For persistent task services, return the foreground startup command and working directory to the orchestrator, "
-                          "which can launch them with start_service. Harness-managed background commands may be stopped when you finish. "
-                          "Do not inspect or modify hidden tests or verifier outputs.\n\n" + instructions)
-                if row["task_id"]:
-                    prompt += "\n\nFull task requirements:\n" + str(self.tasks[row["task_id"]].data.prompt)
-                if self.is_vba:
-                    prompt += "\n\nPartial-credit verification criteria:\n" + json.dumps(self.public_subtasks(), indent=2)
-                    if row["subtask_id"]:
-                        prompt += "\n\nAssigned rubric subtask: " + row["subtask_id"]
-                result = await launch_harness(self.config, runtime, route, self.base_url + "/agents/" + agent_id + "/v1", prompt)
+                result = await launch_harness(self.config, runtime, route, self.base_url + "/agents/" + agent_id + "/v1", instructions)
                 row.update(state="completed" if result.exit_code == 0 else "timed_out" if result.exit_code in (124, 137) else "error",
                            exit_code=result.exit_code, output=scrub(result.stdout[-16000:]), stderr=scrub(result.stderr[-4000:]))
         except asyncio.CancelledError:
@@ -236,10 +215,6 @@ class SharedTeam(Team):
 
     async def grade_tasks(self):
         self.phase = "grading"
-        if self.is_vba:
-            from .vba import grade_vba
-            await grade_vba(self)
-            return
         for index, task_id in enumerate(self.config.task_ids):
             row = self.rows[task_id]
             remaining = self.deadline - time.monotonic()
@@ -286,44 +261,17 @@ class SharedTeam(Team):
                 self.event("task_graded", **row)
                 self.write_result()
 
-    def public_subtasks(self):
-        return [{key: row[key] for key in ("subtask_id", "title", "criteria", "weight")} for row in rubric()["subtasks"]]
-
-    def environment_prompt(self):
-        if self.is_vba:
-            return ("Port /shared/legacy_app into /workspace/generated_app using React, FastAPI and SQLite. "
-                    "Read the legacy README and exported VBA to establish shared API and data contracts before splitting work. "
-                    "Each subtask earns independent partial credit; finishing every subtask earns 1.0. "
-                    "Use migration_summary.json commands.backend for a standalone backend startup command: API checks run it "
-                    "independently of the frontend. UI checks launch run.sh and require the full React app. "
-                    "Both kinds of checks use freshly installed dependencies and the original legacy inputs in a separate verifier container. "
-                    "Only /workspace/generated_app sources are transferred; installed caches and services are not transferred. "
-                    "You may associate helpers with a rubric subtask using spawn_subagent(subtask_id=...). "
-                    "The runner's remaining time overrides the task prompt's published time allowance. ")
-        return ("Bottle lives at /app and uses the default Python. Use /app/pypi and /opt/bench-pypi/bin/python for PyPI. "
-                "Exclude /app/dclm and /app/pypi when discovering Bottle repo tests with pytest. "
-                "The Git task lives at /app/dclm; QEMU inputs are /app/alpine.iso and /app/alpine-disk.qcow2. ")
-
     def coordinator_prompt(self):
         tasks = [{"task_id": task, "working_directory": self.task_workdirs[task], "prompt": self.tasks[task].data.prompt} for task in self.config.task_ids]
-        return ("You are the lead agent responsible for completing ALL tasks below in ONE shared Docker container. "
-                "You have terminal and file tools and can inspect, edit and test every task yourself. "
-                "Use spawn_subagent for useful subtasks, wait_for_subagents to read their outputs, and stop_subagent when needed. "
-                "Helpers use the configured executor model and your same harness and container. You choose the division of work; "
-                "you can review changes, correct them directly, or spawn more helpers with follow-up instructions. "
-                "Coordinate ownership of overlapping files. A helper finishing does not finish the batch. "
-                + self.environment_prompt() +
-                "All files and running services are visible to all agents. Use start_service with a foreground command to launch "
-                "persistent services for development. Legacy graders use those live services; VBA grading restarts the submitted app. "
-                "Use stop_service to replace a service. Helpers can return startup commands for you to launch; "
-                "do not rely on a helper's harness-managed background processes surviving its exit. Check service readiness using terminal tools. "
-                "Do not inspect or modify hidden tests or verifier outputs. Run your own checks and review helper work. "
+        return (f"You have {max(0, self.execution_deadline - time.monotonic()):.0f} seconds to complete the task below. "
+                "This time limit overrides any time allowance in the task. "
+                "You may use spawn_subagent to spawn as many subagents as needed within the shared resources "
+                f"({self.config.sandbox.shared_cpus} CPUs, {self.config.sandbox.shared_memory_gb} GiB RAM) to finish in time. "
+                "All agents work in ONE shared Docker container. "
                 "Your FINAL ANSWER submits all work: remaining helpers are stopped before hidden grading begins. "
-                "Finish only when you are ready to submit the complete application or task batch. "
                 "Do not claim a hidden verifier pass; the runner records those results after you finish. "
-                f"You have {max(0, self.execution_deadline - time.monotonic()):.0f} seconds of agent time left; grading has a separate reserve inside the batch deadline.\n\n"
-                + json.dumps(tasks, indent=2)
-                + ("\n\nPartial-credit verification criteria:\n" + json.dumps(self.public_subtasks(), indent=2) if self.is_vba else ""))
+                "\n\n"
+                + json.dumps(tasks, indent=2))
 
     async def run(self, base_url):
         self.base_url = base_url
@@ -388,11 +336,4 @@ class SharedTeam(Team):
                       workers=[self.worker_status(agent_id) for agent_id in self.workers], tasks=list(self.rows.values()))
         # A helper may cover multiple tasks; costs belong to agents/team, not grades.
         result.pop("coordinator_delegated_all_tasks", None)
-        if self.is_vba:
-            row = self.rows[TASK_ID]
-            result.update(scoring=self.config.scoring, dataset=self.config.dataset,
-                          partial_reward=row["reward"], score_complete=row["score_complete"],
-                          passed_subtasks=row["passed_subtasks"], scored_subtasks=row["scored_subtasks"], subtask_count=row["subtask_count"],
-                          scored_checks=row["scored_checks"], check_count=row["check_count"],
-                          scored_tasks=int(row["scored_checks"] > 0), verifier_image=self.verifier_image)
         return result

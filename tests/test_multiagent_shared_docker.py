@@ -10,7 +10,7 @@ import pytest
 from verifiers.v1.runtimes import ProgramResult
 from verifiers.v1.tasksets.harbor.taskset import HarborData, HarborTask
 
-from harness_bloat_bench.multiagent import shared
+from harness_bloat_bench.multiagent import legacy_shared as shared
 from harness_bloat_bench.multiagent.accounting import Ledger
 from harness_bloat_bench.multiagent.config import load_config
 
@@ -43,7 +43,7 @@ echo '{{"task": "{task_id}"}}' > /logs/verifier/ctrf.json
 '''
             (directory / "tests/test.sh").write_text(script)
             tasks[task_id] = HarborTask(HarborData(idx=index, name=task_id, prompt="Synthetic lifecycle check", task_dir=str(directory)))
-        team = shared.SharedTeam(config, tmp_path, ledger, gateway, None, tasks, time.monotonic() + 90, shared_image=IMAGE)
+        team = shared.LegacySharedTeam(config, tmp_path, ledger, gateway, None, tasks, time.monotonic() + 90, shared_image=IMAGE)
         team.config.grading_reserve_seconds = 45
         async def setup(config, runtime, artifact):
             result = await runtime.run(["mkdir", "-p", "/app/pypi", "/app/dclm"], {})

@@ -244,9 +244,21 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
     endpoint = runtime.host_url(endpoint)
     credential = "BENCH_AGENT_KEY"
     env = {credential: route.token}
+    native = config.scoring == "vba_subtasks_v1"
+    executor = route.native_executor
+    if native:
+        if mcp_url is not None or executor is None:
+            raise ValueError("Native VBA runs require an executor route and no benchmark MCP connection")
+        executor_endpoint = endpoint.replace(f"/agents/{route.agent_id}/", f"/agents/{executor.agent_id}/")
+        env["BENCH_EXECUTOR_KEY"] = executor.token
     if config.harness.id == "opencode":
         provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": endpoint, "apiKey": "{env:" + credential + "}"}, "models": {"agent": {"name": route.model.model, "limit": {"context": 1048576, "output": route.model.max_output_tokens}}}}
         cli_config = {"provider": {"bench": provider}, "permission": {"*": "allow", "task": "deny"}, "tools": {"task": False}, "share": "disabled"}
+        if native:
+            executor_provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": executor_endpoint, "apiKey": "{env:BENCH_EXECUTOR_KEY}"}, "models": {"agent": {"name": executor.model.model, "limit": {"context": 1048576, "output": executor.model.max_output_tokens}}}}
+            cli_config = {"provider": {"bench": provider, "bench-executor": executor_provider},
+                          "share": "disabled", "agent": {name: {"model": "bench-executor/agent", "steps": executor.model.max_calls}
+                                                          for name in ("general", "explore")}}
         if mcp_url:
             cli_config["mcp"] = {"bench": {"type": "remote", "url": runtime.host_url(mcp_url), "timeout": 70000}}
             if config.execution_mode == "isolated_tasks":
@@ -257,15 +269,22 @@ async def launch_harness(config: TeamConfig, runtime: BenchRuntime, route: Agent
     else:
         cli_config = {
             "model": {"default": route.model.model, "provider": "custom", "base_url": endpoint, "api_key": "${" + credential + "}"},
-            "agent": {"max_turns": route.model.max_calls, "system_prompt": "You are a benchmark agent. Follow the user's task precisely. Do not inspect or modify hidden benchmark tests."},
+            "agent": {"max_turns": route.model.max_calls},
             "terminal": {"backend": "local", "cwd": runtime.config.workdir},
         }
+        if native:
+            cli_config["delegation"] = {"model": executor.model.model, "base_url": executor_endpoint,
+                                        "api_key": "${BENCH_EXECUTOR_KEY}", "api_mode": "chat_completions",
+                                        "reasoning_effort": executor.model.reasoning_effort, "max_iterations": executor.model.max_calls}
         if mcp_url:
             cli_config["mcp_servers"] = {"bench": {"url": runtime.host_url(mcp_url)}}
         await runtime.write(state + "/config.yaml", json.dumps(cli_config).encode())
         env.update(HERMES_HOME=state, HERMES_SKIP_NODE_BOOTSTRAP="1", LD_LIBRARY_PATH=HERMES_PYTHON_DEPENDENCY_DIR, HERMES_INTERACTIVE="0")
-        toolsets = "terminal,file,mcp-bench" if mcp_url else "terminal,file"
-        if mcp_url and config.execution_mode == "isolated_tasks":
-            toolsets = "mcp-bench"
-        argv = [HERMES_BIN, "chat", "--model", route.model.model, "--yolo", "--toolsets", toolsets, "--query", prompt]
+        argv = [HERMES_BIN, "chat", "--model", route.model.model, "--yolo"]
+        if not native:
+            toolsets = "terminal,file,mcp-bench" if mcp_url else "terminal,file"
+            if mcp_url and config.execution_mode == "isolated_tasks":
+                toolsets = "mcp-bench"
+            argv.extend(("--toolsets", toolsets))
+        argv.extend(("--query", prompt))
     return await runtime.run_program(argv, env)

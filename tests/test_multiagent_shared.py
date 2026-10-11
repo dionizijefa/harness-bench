@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from verifiers.v1.runtimes import DockerConfig, ProgramResult
 
-from harness_bloat_bench.multiagent import shared
+from harness_bloat_bench.multiagent import legacy_shared as shared
 from harness_bloat_bench.multiagent.accounting import Ledger
 from harness_bloat_bench.multiagent.config import load_config
 from harness_bloat_bench.multiagent.gateway import AgentRoute
@@ -69,7 +69,7 @@ def setup_team(tmp_path, monkeypatch, *, grade=None):
                 owner.files["/logs/verifier/ctrf.json"] = json.dumps({"task": task_id}).encode()
             return reward or 0.0
         tasks[task_id] = SimpleNamespace(data=SimpleNamespace(prompt="Requirements for " + task_id), solved=solved)
-    team = shared.SharedTeam(config, tmp_path, ledger, gateway, None, tasks, time.monotonic() + 900, shared_image="combined:test")
+    team = shared.LegacySharedTeam(config, tmp_path, ledger, gateway, None, tasks, time.monotonic() + 900, shared_image="combined:test")
     def create():
         team.runtimes.append(owner)
         return owner

@@ -12,7 +12,7 @@ from verifiers.v1.runtimes.docker import docker
 
 from harness_bloat_bench.multiagent.accounting import Ledger
 from harness_bloat_bench.multiagent.config import load_config
-from harness_bloat_bench.multiagent.shared import SharedTeam
+from harness_bloat_bench.multiagent.vba_run import VbaRun
 from harness_bloat_bench.multiagent.vba import grade_vba, prepare_vba_images
 from harness_bloat_bench.multiagent.vba_rubric import TASK_ID
 
@@ -60,32 +60,32 @@ def test_blank_and_backend_only_submissions_in_clean_verifier_containers(tmp_pat
             output.mkdir()
             ledger = Ledger(output)
             gateway = SimpleNamespace(routes={}, inflight={})
-            team = SharedTeam(config, output, ledger, gateway, None, {TASK_ID: task}, time.monotonic() + 300,
-                              shared_image=images["images"]["agent"], verifier_image=images["images"]["verifier"])
-            team.container = team.create_container()
+            benchmark = VbaRun(config, output, ledger, gateway, None, task, time.monotonic() + 300,
+                              agent_image=images["images"]["agent"], verifier_image=images["images"]["verifier"])
+            benchmark.container = benchmark.create_container()
             try:
-                await team.container.start()
-                check = await team.container.run(["bash", "-c", "test ! -e /tests/test_trace_runner.py && test -f /shared/legacy_app/README.md"], {})
+                await benchmark.container.start()
+                check = await benchmark.container.run(["bash", "-c", "test ! -e /tests/test_trace_runner.py && test -f /shared/legacy_app/README.md"], {})
                 assert check.exit_code == 0
                 if backend_only:
-                    await team.container.run(["mkdir", "-p", "/workspace/generated_app/backend"], {})
-                    await team.container.write("/workspace/generated_app/backend/main.py", BACKEND.encode())
-                    await team.container.write("/workspace/generated_app/backend/requirements.txt", b"fastapi==0.139.0\nuvicorn==0.51.0\n")
-                    await team.container.write("/workspace/generated_app/migration_summary.json", json.dumps({"commands": {"backend": 'cd backend && python -m uvicorn main:app --host 127.0.0.1 --port "$BACKEND_PORT"'}}).encode())
+                    await benchmark.container.run(["mkdir", "-p", "/workspace/generated_app/backend"], {})
+                    await benchmark.container.write("/workspace/generated_app/backend/main.py", BACKEND.encode())
+                    await benchmark.container.write("/workspace/generated_app/backend/requirements.txt", b"fastapi==0.139.0\nuvicorn==0.51.0\n")
+                    await benchmark.container.write("/workspace/generated_app/migration_summary.json", json.dumps({"commands": {"backend": 'cd backend && python -m uvicorn main:app --host 127.0.0.1 --port "$BACKEND_PORT"'}}).encode())
                     # Verifier must exclude caches and use its original inputs.
-                    await team.container.run(["bash", "-c", "mkdir -p /workspace/generated_app/.venv; touch /workspace/generated_app/.venv/poison; echo modified > /shared/legacy_app/README.md"], {})
-                await grade_vba(team)
-                row = team.rows[TASK_ID]
+                    await benchmark.container.run(["bash", "-c", "mkdir -p /workspace/generated_app/.venv; touch /workspace/generated_app/.venv/poison; echo modified > /shared/legacy_app/README.md"], {})
+                await grade_vba(benchmark)
+                row = benchmark.task_result
                 assert row["score_complete"], row
                 assert row["reward"] == (.1 if backend_only else 0), row
                 assert row["passed"] is False
-                assert team.summary()["scored_checks"] == 28
+                assert benchmark.summary()["scored_checks"] == 28
                 archive = output / config.name / "tasks" / TASK_ID / "submission.tgz"
                 with tarfile.open(archive) as submitted:
                     assert all(".venv" not in Path(name).parts for name in submitted.getnames())
-                check = await team.container.run(["test", "!", "-e", "/tests/test_trace_runner.py"], {})
+                check = await benchmark.container.run(["test", "!", "-e", "/tests/test_trace_runner.py"], {})
                 assert check.exit_code == 0
             finally:
-                await asyncio.gather(*(runtime.stop() for runtime in team.runtimes), return_exceptions=True)
+                await asyncio.gather(*(runtime.stop() for runtime in benchmark.runtimes), return_exceptions=True)
                 ledger.db.close()
     asyncio.run(scenario())

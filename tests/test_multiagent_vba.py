@@ -1,4 +1,4 @@
-"""Partial credit, independent checks and the single-task team protocol."""
+"""Partial credit, independent checks and the single-task benchmark protocol."""
 import asyncio
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ from harness_bloat_bench.multiagent import vba, vba_verifier
 from harness_bloat_bench.multiagent.accounting import Ledger
 from harness_bloat_bench.multiagent.config import TeamConfig, load_config
 from harness_bloat_bench.multiagent.runner import write_report
-from harness_bloat_bench.multiagent.shared import SharedTeam
+from harness_bloat_bench.multiagent.vba_run import VbaRun
 from harness_bloat_bench.multiagent.vba_rubric import DATASET, TASK_ID, rubric, score_results, validate_traces
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,45 +198,111 @@ def test_prepare_only_connects_single_task_loader_and_both_images(tmp_path, monk
     assert not (tmp_path / "run/multiagent.sqlite").exists()
 
 
-def make_team(path):
+def make_run(path):
     path.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(path)
     config = load_config(CONFIG)
     gateway = SimpleNamespace(routes={}, inflight={})
     gateway.register = lambda route: gateway.routes.update({route.agent_id: route})
     task = SimpleNamespace(data=SimpleNamespace(prompt="Port the original VBA application"))
-    team = SharedTeam(config, path, ledger, gateway, None, {TASK_ID: task}, time.monotonic() + config.batch_timeout_seconds,
-                      shared_image="agent:test", verifier_image="verifier:test")
-    return team, ledger
+    benchmark = VbaRun(config, path, ledger, gateway, None, task, time.monotonic() + config.batch_timeout_seconds,
+                      agent_image="agent:test", verifier_image="verifier:test")
+    return benchmark, ledger
 
 
-def test_single_task_helpers_share_workspace_and_receive_subtask_criteria(tmp_path):
+def test_single_task_uses_native_delegation_without_mcp(tmp_path, monkeypatch):
     async def scenario():
-        team, ledger = make_team(tmp_path)
-        prompt = team.coordinator_prompt()
+        benchmark, ledger = make_run(tmp_path)
+        prompt = benchmark.coordinator_prompt()
         assert "Bottle" not in prompt and "PyPI" not in prompt and "four tasks" not in prompt
-        assert "/workspace/generated_app" in prompt and "atomic-saves" in prompt
-        assert "001_contract_meta" not in prompt
-        assert team.create_container().config.workdir == "/workspace"
-        team.accepting_workers = True
-        async def worker(*args): pass
-        team.worker = worker
-        helper = await team.spawn_subagent("Implement save transactions", subtask_id="atomic-saves")
-        assert helper["task_id"] == TASK_ID and helper["subtask_id"] == "atomic-saves"
-        await team.active[helper["agent_id"]]
-        assert "error" in await team.spawn_subagent("Invalid", subtask_id="made-up")
-        assert team.summary()["task_count"] == 1 and team.summary()["scored_tasks"] == 0
+        assert "Port the original VBA application" in prompt
+        assert "atomic-saves" not in prompt and "001_contract_meta" not in prompt
+        assert not any(hasattr(benchmark, name) for name in ("mcp", "workers", "services", "active", "spawn_subagent", "wait_for_subagents"))
+        assert "spawn_subagent" not in prompt
+        assert prompt.endswith(benchmark.task.data.prompt)
+        assert benchmark.create_container().config.workdir == "/workspace"
+        class Container:
+            async def start(self): pass
+            async def stop(self): pass
+        benchmark.create_container = Container
+        stopped = []
+        class Session:
+            def __init__(self, *args): pass
+            async def stop(self): stopped.append(True)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.ContainerSession", Session)
+        async def setup(*args): pass
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.setup_harness", setup)
+        submitted = []
+        async def grade(run):
+            assert run is benchmark and stopped == [True]
+            assert all(route.deadline <= time.monotonic() for route in benchmark.gateway.routes.values())
+            submitted.append(True)
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.grade_vba", grade)
+        async def launch(config, runtime, route, endpoint, prompt, mcp_url=None):
+            assert mcp_url is None
+            assert "Port the original VBA application" in prompt
+            assert route.native_executor.model == config.executor
+            assert route.native_executor.aggregate_native_workers
+            assert route.native_executor.deadline == benchmark.execution_deadline
+            return ProgramResult(0, "Changes ready", "")
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.launch_harness", launch)
+        await benchmark.run("http://localhost")
+        assert submitted == [True]
+        assert "worker_spawn_count" not in benchmark.summary()
+        assert "workers" not in benchmark.summary() and "services" not in benchmark.summary()
+        assert benchmark.summary()["task_count"] == 1 and benchmark.summary()["scored_tasks"] == 0
+        ledger.db.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_native_run_stops_cli_before_grading_and_skips_grading_on_cancellation(tmp_path, monkeypatch, cancelled):
+    async def scenario():
+        benchmark, ledger = make_run(tmp_path)
+        lifecycle = []
+        class Container:
+            async def start(self): pass
+            async def stop(self): lifecycle.append("container stopped")
+        class Session:
+            def __init__(self, *args): pass
+            async def stop(self): lifecycle.append("CLI stopped")
+        benchmark.create_container = Container
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.ContainerSession", Session)
+        async def setup(*args): pass
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.setup_harness", setup)
+        started = asyncio.Event()
+        async def launch(*args):
+            started.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.launch_harness", launch)
+        async def grade(run): lifecycle.append("graded")
+        monkeypatch.setattr("harness_bloat_bench.multiagent.vba_run.grade_vba", grade)
+        if not cancelled:
+            benchmark.deadline = time.monotonic() + benchmark.config.grading_reserve_seconds + .05
+        running = asyncio.create_task(benchmark.run("http://localhost"))
+        await started.wait()
+        if cancelled:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        else:
+            await asyncio.wait_for(running, 1)
+        assert lifecycle == (["CLI stopped", "container stopped"] if cancelled else ["CLI stopped", "graded", "container stopped"])
+        assert benchmark.coordinator["state"] == "timed_out" and benchmark.phase == "finished"
+        assert all(route.deadline <= time.monotonic() for route in benchmark.gateway.routes.values())
+        assert (tmp_path / benchmark.config.name / "result.json").is_file()
         ledger.db.close()
     asyncio.run(scenario())
 
 
 def test_report_presents_partial_credit_with_unscored_components(tmp_path):
-    team, ledger = make_team(tmp_path)
-    team.rows[TASK_ID].update(score_results([evidence("001_contract_meta")]))
+    benchmark, ledger = make_run(tmp_path)
+    benchmark.task_result.update(score_results([evidence("001_contract_meta")]))
     (tmp_path / "manifest.json").write_text('{"overall_timeout_seconds": 4500}')
-    write_report(tmp_path, [team.summary()], 10, {}, ledger.summarize())
+    write_report(tmp_path, [benchmark.summary()], 10, {}, ledger.summarize())
     report = (tmp_path / "report.html").read_text()
     assert "10.0% (incomplete)" in report and "Subtask verification" in report
+    assert "unmeasured" in report and "no benchmark MCP tools" in report
     saved = json.loads((tmp_path / "comparison.json").read_text())["teams"][0]
     assert saved["partial_reward"] == .1 and saved["pass_rate"] == 0
     assert saved["tasks"][0]["subtasks"][0]["verifier_state"] == "passed"
@@ -282,11 +348,11 @@ def test_each_check_restores_database_and_continues_after_failure_or_timeout(tmp
 @pytest.mark.parametrize("remaining_seconds", [4500, 30])
 def test_grading_cap_early_completion_and_checkpointed_credit(tmp_path, monkeypatch, interruption, remaining_seconds):
     async def scenario():
-        team, ledger = make_team(tmp_path)
-        team.deadline = time.monotonic() + remaining_seconds
-        team.container = SimpleNamespace(name="agents", run=lambda *args: None)
+        benchmark, ledger = make_run(tmp_path)
+        benchmark.deadline = time.monotonic() + remaining_seconds
+        benchmark.container = SimpleNamespace(name="agents", run=lambda *args: None)
         async def run(*args): return ProgramResult(0, "", "")
-        team.container.run = run
+        benchmark.container.run = run
         stopped = []
         class Grader:
             def __init__(self, *args): self.name = "verifier"
@@ -315,14 +381,14 @@ def test_grading_cap_early_completion_and_checkpointed_credit(tmp_path, monkeypa
         monkeypatch.setattr(vba, "docker", docker)
         if interruption is asyncio.CancelledError:
             with pytest.raises(asyncio.CancelledError):
-                await vba.grade_vba(team)
+                await vba.grade_vba(benchmark)
         else:
-            await asyncio.wait_for(vba.grade_vba(team), timeout=1)
+            await asyncio.wait_for(vba.grade_vba(benchmark), timeout=1)
         assert stopped == ["session", "container"]
-        row = team.rows[TASK_ID]
+        row = benchmark.task_result
         assert row["state"] == ("timed_out" if interruption else "unscored") and row["reward"] == .1
         assert row["verifier_state"] == "partial" and not row["score_complete"]
-        saved = json.loads((tmp_path / team.config.name / "result.json").read_text())
+        saved = json.loads((tmp_path / benchmark.config.name / "result.json").read_text())
         assert saved["partial_reward"] == .1
         ledger.db.close()
     asyncio.run(scenario())
